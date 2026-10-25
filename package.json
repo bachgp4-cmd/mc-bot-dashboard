@@ -1,18 +1,27 @@
+```json
 {
   "name": "mc-bot-dashboard",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Minecraft Mineflayer bot with real-time Express and Socket.IO dashboard",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "bot",
+    "dashboard",
+    "socket.io"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
-    "express": "^5.3.0",
-    "mineflayer": "^4.39.0",
-    "socket.io": "^4.8.4"
+    "express": "^4.21.2",
+    "mineflayer": "^4.31.0",
+    "socket.io": "^4.8.1"
   }
 }
+```
