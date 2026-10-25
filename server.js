@@ -1,620 +1,821 @@
 
-'use strict';
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const mineflayer = require('mineflayer');
 
-const CONFIG = {
-  host: process.env.MC_HOST || 'kingmc.vn',
-  port: Number(process.env.MC_PORT || 25565),
-  username: process.env.MC_USERNAME || '_caubemocoi_',
-  password: process.env.MC_PASSWORD || '',
-  version: process.env.MC_VERSION || false,
-  webHost: '0.0.0.0',
-  webPort: Number(process.env.PORT || 3000),
-  reconnectMs: Math.max(3000, Number(process.env.RECONNECT_MS || 10000)),
-  antiAfkMs: Math.max(10000, Number(process.env.ANTI_AFK_MS || 30000)),
-  maxLogs: 250,
-  maxChat: 100
-};
-
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-app.use(express.json({ limit: '32kb' }));
+const PORT = Number(process.env.PORT) || 3000;
+
+const CONFIG = {
+  host: process.env.MC_HOST || 'kingmc.vn',
+  port: Number(process.env.MC_PORT) || 25565,
+  username: process.env.MC_USERNAME || 'YourBotName',
+  auth: process.env.MC_AUTH || 'offline',
+  version: process.env.MC_VERSION || false,
+  reconnectMs: Math.max(
+    5000,
+    Number(process.env.RECONNECT_MS) || 15000
+  )
+};
 
 let bot = null;
-let botState = 'offline';
-let lastError = '';
+let status = 'Đang khởi động';
 let reconnectTimer = null;
-let antiAfkTimer = null;
 let reconnectEnabled = true;
+let manualDisconnect = false;
+let generation = 0;
 let currentWindow = null;
-const logs = [];
-const chatHistory = [];
-const startedAt = Date.now();
 
-function log(type, message) {
+const logs = [];
+const MAX_LOGS = 250;
+
+function addLog(type, message) {
   const entry = {
-    time: new Date().toLocaleTimeString('vi-VN', { hour12: false }),
-    type: String(type),
-    message: String(message).slice(0, 2000)
+    time: new Date().toLocaleTimeString('vi-VN'),
+    type,
+    message: String(message).slice(0, 1000)
   };
 
   logs.push(entry);
-  if (logs.length > CONFIG.maxLogs) logs.shift();
 
-  console.log(`[${entry.time}] [${entry.type}] ${entry.message}`);
+  if (logs.length > MAX_LOGS) {
+    logs.shift();
+  }
+
+  console.log(
+    `[${entry.time}] [${type}] ${entry.message}`
+  );
+
   io.emit('log', entry);
 }
 
-function addChat(username, message, type = 'chat') {
-  const entry = {
-    time: new Date().toLocaleTimeString('vi-VN', { hour12: false }),
-    username: String(username || 'server').slice(0, 64),
-    message: String(message || '').slice(0, 1000),
-    type
-  };
-
-  chatHistory.push(entry);
-  if (chatHistory.length > CONFIG.maxChat) chatHistory.shift();
-
-  io.emit('chat', entry);
+function setStatus(value) {
+  status = value;
+  io.emit('status', status);
 }
 
-function getWindowSnapshot() {
-  if (!bot || !bot.currentWindow) return null;
-
-  const window = bot.currentWindow;
-
+function getBotState() {
   return {
-    title: String(window.title || 'Inventory').replace(/\u00a7./g, ''),
-    slots: (window.slots || []).slice(0, 90).map((item, slot) => {
-      if (!item) return null;
+    status,
+    connected: Boolean(bot && bot.player),
+    username: CONFIG.username,
+    host: CONFIG.host,
+    port: CONFIG.port
+  };
+}
 
+function getWindowData() {
+  if (!bot) {
+    return {
+      title: 'Chưa kết nối',
+      items: []
+    };
+  }
+
+  const windowToShow = currentWindow || bot.inventory;
+
+  if (!windowToShow) {
+    return {
+      title: 'Chưa có GUI',
+      items: []
+    };
+  }
+
+  const items = (windowToShow.slots || []).map((item, slot) => {
+    if (!item) {
       return {
         slot,
-        name: item.name || 'unknown',
-        displayName: item.displayName || item.name || 'Unknown',
-        count: item.count || 1
+        empty: true,
+        name: '',
+        count: 0
       };
-    })
-  };
-}
+    }
 
-function getStatus() {
-  const position = bot?.entity?.position;
+    return {
+      slot,
+      empty: false,
+      name: item.displayName || item.name || 'Item',
+      itemName: item.name || '',
+      count: item.count || 1,
+      type: item.type
+    };
+  });
 
   return {
-    state: botState,
-    host: CONFIG.host,
-    port: CONFIG.port,
-    username: CONFIG.username,
-    connected: Boolean(bot && bot.player && botState === 'online'),
-    health: Number.isFinite(bot?.health) ? bot.health : null,
-    food: Number.isFinite(bot?.food) ? bot.food : null,
-    position: position
-      ? {
-          x: Math.round(position.x * 100) / 100,
-          y: Math.round(position.y * 100) / 100,
-          z: Math.round(position.z * 100) / 100
-        }
-      : null,
-    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    lastError,
-    window: getWindowSnapshot()
+    title: currentWindow
+      ? (currentWindow.title || 'GUI trong game')
+      : 'Inventory',
+    items
   };
 }
 
-function broadcastStatus() {
-  io.emit('status', getStatus());
+function broadcastWindow() {
+  io.emit('windowData', getWindowData());
 }
 
-function stopTimers() {
-  if (antiAfkTimer) clearInterval(antiAfkTimer);
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-
-  antiAfkTimer = null;
-  reconnectTimer = null;
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 }
 
 function scheduleReconnect() {
-  if (!reconnectEnabled || reconnectTimer) return;
+  clearReconnectTimer();
 
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    createBot();
-  }, CONFIG.reconnectMs);
-
-  log('info', `Thử kết nối lại sau ${CONFIG.reconnectMs / 1000} giây.`);
-}
-
-function startAntiAfk() {
-  if (antiAfkTimer) clearInterval(antiAfkTimer);
-
-  antiAfkTimer = setInterval(() => {
-    if (!bot || botState !== 'online' || !bot.entity) return;
-
-    try {
-      bot.setControlState('jump', true);
-
-      setTimeout(() => {
-        if (bot && botState === 'online') {
-          try {
-            bot.setControlState('jump', false);
-          } catch (_) {
-            // Bot có thể đã ngắt kết nối.
-          }
-        }
-      }, 350);
-    } catch (error) {
-      log('warn', `Anti-AFK: ${error.message}`);
-    }
-  }, CONFIG.antiAfkMs);
-}
-
-function createBot() {
-  if (!reconnectEnabled) return;
-
-  if (bot && (botState === 'connecting' || botState === 'online')) {
+  if (!reconnectEnabled || manualDisconnect) {
     return;
   }
 
-  botState = 'connecting';
-  lastError = '';
+  setStatus('Mất kết nối - đang chờ kết nối lại');
 
-  log('info', `Đang kết nối ${CONFIG.host}:${CONFIG.port}...`);
-  broadcastStatus();
+  addLog(
+    'system',
+    `Thử kết nối lại sau ${CONFIG.reconnectMs / 1000} giây`
+  );
 
-  const options = {
-    host: CONFIG.host,
-    port: CONFIG.port,
-    username: CONFIG.username,
-    auth: 'offline',
-    hideErrors: false
-  };
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
 
-  if (CONFIG.version) {
-    options.version = CONFIG.version;
+    if (reconnectEnabled && !manualDisconnect) {
+      connectBot();
+    }
+  }, CONFIG.reconnectMs);
+}
+
+function connectBot() {
+  clearReconnectTimer();
+
+  if (!reconnectEnabled || manualDisconnect) {
+    return;
   }
+
+  // Invalidate callbacks from an older bot instance.
+  const thisGeneration = ++generation;
+
+  if (bot) {
+    const oldBot = bot;
+    bot = null;
+
+    try {
+      oldBot.removeAllListeners();
+      oldBot.quit();
+    } catch (_) {
+      try {
+        oldBot.end();
+      } catch (_) {}
+    }
+  }
+
+  currentWindow = null;
+
+  setStatus('Đang kết nối...');
+  addLog('system', `Đang kết nối tới ${CONFIG.host}:${CONFIG.port}`);
 
   let newBot;
 
   try {
-    newBot = mineflayer.createBot(options);
-    bot = newBot;
+    newBot = mineflayer.createBot({
+      host: CONFIG.host,
+      port: CONFIG.port,
+      username: CONFIG.username,
+      auth: CONFIG.auth,
+      version: CONFIG.version || undefined
+    });
   } catch (error) {
-    bot = null;
-    botState = 'offline';
-    lastError = error.message;
-
-    log('error', `Không tạo được bot: ${error.message}`);
-    broadcastStatus();
+    addLog('error', error.message);
     scheduleReconnect();
     return;
   }
 
-  newBot.once('login', () => {
-    if (bot !== newBot) return;
+  bot = newBot;
 
-    botState = 'online';
-    log('success', `Đã đăng nhập Minecraft với tên ${CONFIG.username}.`);
-    broadcastStatus();
-    startAntiAfk();
+  newBot.on('login', () => {
+    if (thisGeneration !== generation) return;
+
+    setStatus('Đã đăng nhập - đang vào game');
+    addLog('system', 'Đã đăng nhập vào máy chủ Minecraft');
   });
 
   newBot.on('spawn', () => {
-    if (bot !== newBot) return;
+    if (thisGeneration !== generation) return;
 
-    botState = 'online';
-    log('success', 'Bot đã xuất hiện trong thế giới Minecraft.');
-    broadcastStatus();
-    startAntiAfk();
+    setStatus('Online');
+    addLog('success', 'Bot đã vào game');
+    broadcastWindow();
   });
 
-  newBot.on('message', (jsonMessage) => {
-    const message = String(
-      jsonMessage?.toString?.() ?? jsonMessage ?? ''
-    );
+  newBot.on('messagestr', (message) => {
+    if (thisGeneration !== generation) return;
 
-    addChat('server', message, 'server');
-
-    // Tự xác thực nếu máy chủ yêu cầu.
-    // Không ghi mật khẩu vào log.
-    const plain = message.replace(/\u00a7./g, '');
-
-    if (!CONFIG.password || bot !== newBot) return;
-
-    if (/please\s+login|\/login|đăng nhập|dang nhap/i.test(plain)) {
-      setTimeout(() => {
-        if (bot !== newBot || botState !== 'online') return;
-
-        try {
-          newBot.chat(`/login ${CONFIG.password}`);
-          log('info', 'Đã gửi lệnh đăng nhập trong game.');
-        } catch (error) {
-          log('error', `Gửi lệnh đăng nhập thất bại: ${error.message}`);
-        }
-      }, 1200);
-    } else if (/please\s+register|\/register|đăng ký|dang ky/i.test(plain)) {
-      setTimeout(() => {
-        if (bot !== newBot || botState !== 'online') return;
-
-        try {
-          newBot.chat(`/register ${CONFIG.password} ${CONFIG.password}`);
-          log('info', 'Đã gửi lệnh đăng ký trong game.');
-        } catch (error) {
-          log('error', `Gửi lệnh đăng ký thất bại: ${error.message}`);
-        }
-      }, 1200);
-    }
+    addLog('chat', message);
   });
 
   newBot.on('chat', (username, message) => {
-    if (username !== newBot.username) {
-      addChat(username, message);
-    }
+    if (thisGeneration !== generation) return;
+
+    // Public player chat. Server/system messages are logged separately.
+    io.emit('playerChat', {
+      username,
+      message
+    });
   });
 
   newBot.on('windowOpen', (window) => {
-    if (bot !== newBot) return;
+    if (thisGeneration !== generation) return;
 
     currentWindow = window;
-    io.emit('window', getWindowSnapshot());
-    log('info', `Đã mở giao diện: ${window.title || 'Inventory'}`);
+    addLog('system', `Đã mở GUI: ${window.title || 'Không có tiêu đề'}`);
+    broadcastWindow();
   });
 
   newBot.on('windowClose', () => {
-    if (bot !== newBot) return;
+    if (thisGeneration !== generation) return;
 
     currentWindow = null;
-    io.emit('window', null);
-    log('info', 'Giao diện vật phẩm đã đóng.');
+    addLog('system', 'GUI đã đóng');
+    broadcastWindow();
   });
 
-  newBot.on('health', broadcastStatus);
+  newBot.on('heldItemChanged', () => {
+    if (thisGeneration === generation) {
+      broadcastWindow();
+    }
+  });
 
   newBot.on('kicked', (reason) => {
-    lastError = `Bị máy chủ ngắt: ${
-      typeof reason === 'string' ? reason : JSON.stringify(reason)
-    }`;
+    if (thisGeneration !== generation) return;
 
-    log('warn', lastError);
+    addLog('warning', `Server đã đá bot: ${reason}`);
+    setStatus('Bị server đá');
   });
 
   newBot.on('error', (error) => {
-    lastError = error?.message || String(error);
-    log('error', `Minecraft: ${lastError}`);
+    if (thisGeneration !== generation) return;
+
+    addLog('error', error.message || String(error));
   });
 
   newBot.on('end', (reason) => {
-    if (bot !== newBot) return;
+    if (thisGeneration !== generation) return;
 
-    log('warn', `Kết nối đã kết thúc${reason ? `: ${reason}` : '.'}`);
+    if (bot === newBot) {
+      bot = null;
+    }
 
-    bot = null;
-    botState = 'offline';
     currentWindow = null;
+    addLog('warning', `Bot mất kết nối: ${reason || 'Không rõ lý do'}`);
+    broadcastWindow();
 
-    if (antiAfkTimer) clearInterval(antiAfkTimer);
-    antiAfkTimer = null;
-
-    io.emit('window', null);
-    broadcastStatus();
     scheduleReconnect();
   });
 }
 
-const dashboardHtml = `<!doctype html>
+function disconnectBot() {
+  manualDisconnect = true;
+  clearReconnectTimer();
+
+  const oldBot = bot;
+  bot = null;
+  currentWindow = null;
+
+  // Prevent the end event from scheduling an automatic reconnect.
+  generation++;
+
+  setStatus('Đã ngắt kết nối thủ công');
+
+  if (oldBot) {
+    try {
+      oldBot.quit();
+    } catch (_) {
+      try {
+        oldBot.end();
+      } catch (_) {}
+    }
+  }
+
+  addLog('system', 'Đã ngắt kết nối theo yêu cầu của bạn');
+  broadcastWindow();
+}
+
+function sendChatOrCommand(message) {
+  if (!bot || !bot.player) {
+    throw new Error('Bot chưa vào game');
+  }
+
+  const text = String(message || '').trim();
+
+  if (!text) {
+    throw new Error('Bạn chưa nhập nội dung');
+  }
+
+  if (text.length > 256) {
+    throw new Error('Nội dung quá dài');
+  }
+
+  // Commands are sent only when you submit them from the dashboard.
+  bot.chat(text);
+
+  addLog('sent', text);
+}
+
+function clickWindowSlot(slot) {
+  if (!bot || !bot.player) {
+    throw new Error('Bot chưa vào game');
+  }
+
+  const index = Number(slot);
+
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error('Slot không hợp lệ');
+  }
+
+  const targetWindow = currentWindow || bot.inventory;
+
+  if (!targetWindow || index >= targetWindow.slots.length) {
+    throw new Error('Slot không tồn tại');
+  }
+
+  bot.clickWindow(index, 0, 0);
+}
+
+io.on('connection', (socket) => {
+  socket.emit('initialState', {
+    state: getBotState(),
+    logs,
+    windowData: getWindowData()
+  });
+
+  socket.on('connectBot', (callback) => {
+    manualDisconnect = false;
+    reconnectEnabled = true;
+
+    clearReconnectTimer();
+    connectBot();
+
+    if (typeof callback === 'function') {
+      callback({ ok: true });
+    }
+  });
+
+  socket.on('disconnectBot', (callback) => {
+    disconnectBot();
+
+    if (typeof callback === 'function') {
+      callback({ ok: true });
+    }
+  });
+
+  socket.on('sendChat', (message, callback) => {
+    try {
+      sendChatOrCommand(message);
+
+      if (typeof callback === 'function') {
+        callback({ ok: true });
+      }
+    } catch (error) {
+      if (typeof callback === 'function') {
+        callback({ ok: false, error: error.message });
+      }
+    }
+  });
+
+  socket.on('refreshInventory', (callback) => {
+    broadcastWindow();
+
+    if (typeof callback === 'function') {
+      callback({ ok: true });
+    }
+  });
+
+  socket.on('clickSlot', async (slot, callback) => {
+    try {
+      clickWindowSlot(slot);
+
+      // Let the server update the window before refreshing the UI.
+      setTimeout(broadcastWindow, 250);
+
+      if (typeof callback === 'function') {
+        callback({ ok: true });
+      }
+    } catch (error) {
+      if (typeof callback === 'function') {
+        callback({ ok: false, error: error.message });
+      }
+    }
+  });
+
+  socket.on('closeWindow', (callback) => {
+    try {
+      if (!bot || !bot.player) {
+        throw new Error('Bot chưa vào game');
+      }
+
+      if (currentWindow) {
+        bot.closeWindow(currentWindow);
+      }
+
+      if (typeof callback === 'function') {
+        callback({ ok: true });
+      }
+    } catch (error) {
+      if (typeof callback === 'function') {
+        callback({ ok: false, error: error.message });
+      }
+    }
+  });
+});
+
+app.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    state: getBotState()
+  });
+});
+
+app.get('/', (_req, res) => {
+  res.type('html').send(HTML);
+});
+
+const HTML = String.raw`<!DOCTYPE html>
 <html lang="vi">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Minecraft Bot Dashboard</title>
 <style>
-*{box-sizing:border-box}
-body{margin:0;background:#f3f6fb;color:#172033;font-family:Arial,sans-serif}
-header{padding:20px;background:white;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-h1{margin:0;font-size:22px}
-main{max-width:1200px;margin:auto;padding:18px;display:grid;gap:16px}
-.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.columns{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.card{background:white;border:1px solid #e2e8f0;border-radius:12px;padding:16px;min-width:0}
-.label,.muted{color:#64748b;font-size:13px}
-.value{font-size:21px;font-weight:bold;margin-top:8px;overflow-wrap:anywhere}
-h2{font-size:17px;margin:0 0 12px}
-.status{padding:8px 12px;background:#e2e8f0;border-radius:20px;align-self:center}
-.online{background:#dcfce7;color:#166534}
-.offline{background:#fee2e2;color:#991b1b}
-.controls{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
-input,button{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}
-input{flex:1;min-width:160px}
-button{background:#2563eb;color:white;border-color:#2563eb;cursor:pointer}
-.secondary{background:white;color:#334155}
-.logs,.chat{height:280px;overflow:auto;background:#111827;color:#e5e7eb;border-radius:8px;padding:10px;font:12px/1.6 monospace;overflow-wrap:anywhere;white-space:pre-wrap}
-.inventory{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:5px;margin-top:12px}
-.slot{min-width:0;min-height:48px;background:#f8fafc;color:#172033;border:1px solid #cbd5e1;padding:4px;font-size:10px;overflow-wrap:anywhere}
-.slot b{display:block}
-.foot{color:#64748b;font-size:12px;text-align:center}
-@media(max-width:750px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.columns{grid-template-columns:1fr}main{padding:10px}}
+:root {
+  color-scheme: light;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #f4f6f9;
+  color: #202938;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+header {
+  background: #fff;
+  border-bottom: 1px solid #e0e5ec;
+  padding: 18px 22px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+h1 { font-size: 21px; margin: 0; }
+main {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px;
+}
+.panel {
+  background: #fff;
+  border: 1px solid #e1e6ed;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  min-width: 0;
+}
+h2 { font-size: 16px; margin: 0 0 13px; }
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 20px;
+  padding: 8px 12px;
+  background: #eef2f7;
+  font-size: 13px;
+}
+.dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #8b95a5;
+}
+.dot.online { background: #16a34a; }
+.controls, .sendrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+button {
+  border: 1px solid #d3dbe5;
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: #fff;
+  color: #202938;
+  cursor: pointer;
+  font-size: 13px;
+}
+button:hover { background: #f0f5fb; }
+button.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: white;
+}
+button.danger {
+  color: #b42318;
+  border-color: #f0b8b3;
+}
+button:disabled { opacity: .5; cursor: not-allowed; }
+.info {
+  font-size: 13px;
+  color: #5e6878;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+.logs, .chat {
+  background: #fff;
+  color: #202938;
+  border: 1px solid #dce2e9;
+  border-radius: 8px;
+  height: 320px;
+  overflow-y: auto;
+  padding: 10px;
+  font: 12px/1.55 Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.logline { padding: 3px 0; border-bottom: 1px solid #f0f2f5; }
+.time { color: #7b8493; }
+.type { color: #2563eb; font-weight: bold; }
+.type.error, .type.warning { color: #b42318; }
+.type.success { color: #16803c; }
+.type.sent { color: #8a4b08; }
+.chatline { padding: 4px 0; border-bottom: 1px solid #f0f2f5; }
+input {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid #cbd4df;
+  border-radius: 8px;
+  background: white;
+  color: #202938;
+  padding: 11px;
+  font-size: 14px;
+}
+.sendrow input { flex: 1; }
+.inventory {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(105px, 1fr));
+  gap: 8px;
+  max-height: 430px;
+  overflow-y: auto;
+}
+.slot {
+  min-height: 62px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  background: #fff;
+}
+.slot.empty { color: #9aa3b1; background: #f8fafc; }
+.slot small { display: block; margin-top: 6px; color: #697586; }
+.note { color: #687385; font-size: 12px; line-height: 1.5; }
+@media(max-width: 760px) {
+  .columns { grid-template-columns: 1fr; }
+  main { padding: 12px; }
+  header { padding: 14px; }
+}
 </style>
 </head>
 <body>
 <header>
-  <div>
-    <h1>Minecraft Bot Dashboard</h1>
-    <div class="muted" id="server">Đang tải...</div>
+  <h1>Minecraft Bot Dashboard</h1>
+  <div class="state">
+    <span id="dot" class="dot"></span>
+    <span id="status">Đang kết nối...</span>
   </div>
-  <div id="badge" class="status">Đang kết nối</div>
 </header>
+
 <main>
-  <section class="grid">
-    <div class="card"><div class="label">Máu</div><div class="value" id="health">—</div></div>
-    <div class="card"><div class="label">Thức ăn</div><div class="value" id="food">—</div></div>
-    <div class="card"><div class="label">Tọa độ</div><div class="value" id="position">—</div></div>
-    <div class="card"><div class="label">Thời gian chạy</div><div class="value" id="uptime">—</div></div>
+  <section class="panel">
+    <h2>Kết nối</h2>
+    <div class="controls">
+      <button id="connect" class="primary">Kết nối / Thử lại</button>
+      <button id="disconnect" class="danger">Ngắt kết nối</button>
+      <button id="refresh">Làm mới inventory</button>
+      <button id="closeWindow">Đóng GUI</button>
+    </div>
+    <div class="info" id="serverInfo"></div>
+    <p class="note">
+      Bot tự kết nối lại khi mất kết nối. Chat, lệnh, GUI và inventory
+      chỉ được thao tác khi bạn bấm hoặc nhập trên trang này.
+    </p>
   </section>
-  <section class="card">
-    <h2>Điều khiển bot</h2>
-    <div class="muted">Gửi chat hoặc lệnh tới bot trên máy chủ bạn được phép sử dụng.</div>
-    <form class="controls" id="commandForm">
-      <input id="command" maxlength="256" placeholder="Ví dụ: /spawn" autocomplete="off">
-      <button type="submit">Gửi</button>
-      <button type="button" class="secondary" id="refresh">Làm mới</button>
-      <button type="button" id="reconnect">Kết nối lại</button>
+
+  <section class="panel">
+    <h2>Chat và lệnh</h2>
+    <form id="chatForm" class="sendrow">
+      <input id="chatInput" maxlength="256"
+        placeholder="Nhập tin nhắn hoặc lệnh, ví dụ /help"
+        autocomplete="off">
+      <button class="primary" type="submit">Gửi</button>
     </form>
+    <p class="note">Lệnh bắt đầu bằng / sẽ được gửi nguyên văn tới server.</p>
+    <div id="chat" class="chat" aria-live="polite"></div>
   </section>
-  <section class="columns">
-    <div class="card"><h2>Log trực tiếp</h2><div class="logs" id="logs"></div></div>
-    <div class="card"><h2>Chat Minecraft</h2><div class="chat" id="chat"></div></div>
-  </section>
-  <section class="card">
-    <h2>Giao diện / túi đồ</h2>
-    <div class="muted" id="windowTitle">Chưa mở giao diện.</div>
-    <div class="inventory" id="inventory"></div>
-  </section>
-  <div class="foot">Cập nhật trạng thái qua Socket.IO.</div>
+
+  <div class="columns">
+    <section class="panel">
+      <h2>Log hệ thống</h2>
+      <div id="logs" class="logs"></div>
+    </section>
+
+    <section class="panel">
+      <h2 id="windowTitle">Inventory / GUI</h2>
+      <div id="inventory" class="inventory"></div>
+      <p class="note">
+        Bấm vào ô để thử thao tác với slot tương ứng.
+        Một số GUI đặc biệt có thể cần cách xử lý riêng.
+      </p>
+    </section>
+  </div>
 </main>
+
 <script src="/socket.io/socket.io.js"></script>
 <script>
 const socket = io();
-const $ = id => document.getElementById(id);
 
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, char => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[char]);
-}
+const $ = (id) => document.getElementById(id);
 
 function addLog(entry) {
-  const el = document.createElement('div');
-  el.textContent = '[' + entry.time + '] [' + entry.type + '] ' + entry.message;
-  $('logs').appendChild(el);
-  while ($('logs').children.length > 250) $('logs').firstChild.remove();
+  const row = document.createElement('div');
+  row.className = 'logline';
+
+  const time = document.createElement('span');
+  time.className = 'time';
+  time.textContent = '[' + (entry.time || '') + '] ';
+
+  const type = document.createElement('span');
+  type.className = 'type ' + (entry.type || '');
+  type.textContent = '[' + (entry.type || 'log') + '] ';
+
+  const message = document.createElement('span');
+  message.textContent = entry.message || '';
+
+  row.append(time, type, message);
+  $('logs').appendChild(row);
+
+  while ($('logs').children.length > 250) {
+    $('logs').firstChild.remove();
+  }
+
   $('logs').scrollTop = $('logs').scrollHeight;
 }
 
-function addChat(entry) {
-  const el = document.createElement('div');
-  el.textContent = '[' + entry.time + '] ' + entry.username + ': ' + entry.message;
-  $('chat').appendChild(el);
-  while ($('chat').children.length > 100) $('chat').firstChild.remove();
+function addChat(username, message) {
+  const row = document.createElement('div');
+  row.className = 'chatline';
+
+  const who = document.createElement('strong');
+  who.textContent = username + ': ';
+
+  const content = document.createElement('span');
+  content.textContent = message;
+
+  row.append(who, content);
+  $('chat').appendChild(row);
+
+  while ($('chat').children.length > 250) {
+    $('chat').firstChild.remove();
+  }
+
   $('chat').scrollTop = $('chat').scrollHeight;
 }
 
-function formatTime(seconds) {
-  seconds = Math.max(0, Number(seconds) || 0);
-  return Math.floor(seconds / 3600) + 'h ' +
-    Math.floor(seconds % 3600 / 60) + 'm ' +
-    Math.floor(seconds % 60) + 's';
+function setStatus(status) {
+  $('status').textContent = status;
+  $('dot').classList.toggle('online', status === 'Online');
 }
 
-function showStatus(status) {
-  $('server').textContent = status.host + ':' + status.port + ' · ' + status.username;
-  $('badge').textContent = status.state;
-  $('badge').className = 'status ' + (status.connected ? 'online' :
-    (status.state === 'offline' ? 'offline' : ''));
+function renderWindow(data) {
+  $('windowTitle').textContent = data.title || 'Inventory / GUI';
 
-  $('health').textContent = status.health ?? '—';
-  $('food').textContent = status.food ?? '—';
-  $('position').textContent = status.position
-    ? [status.position.x, status.position.y, status.position.z].join(' / ')
-    : '—';
-  $('uptime').textContent = formatTime(status.uptimeSeconds);
+  const container = $('inventory');
+  container.replaceChildren();
 
-  if (status.window) showWindow(status.window);
-}
-
-function showWindow(windowData) {
-  $('inventory').replaceChildren();
-
-  if (!windowData) {
-    $('windowTitle').textContent = 'Chưa mở giao diện.';
-    return;
-  }
-
-  $('windowTitle').textContent = windowData.title;
-  windowData.slots.forEach((item, index) => {
+  (data.items || []).forEach((item) => {
     const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'slot';
+    button.className = 'slot' + (item.empty ? ' empty' : '');
+    button.disabled = item.empty;
 
-    if (item) {
-      button.innerHTML = '<b>' + escapeHtml(item.displayName) +
-        '</b> ×' + escapeHtml(item.count);
-    } else {
-      button.textContent = 'Ô ' + index;
-    }
+    const title = document.createElement('span');
+    title.textContent = item.empty
+      ? 'Slot ' + item.slot + ' (trống)'
+      : item.name + ' × ' + item.count;
+
+    const small = document.createElement('small');
+    small.textContent = 'Slot ' + item.slot;
+
+    button.append(title, small);
 
     button.addEventListener('click', () => {
-      socket.emit('windowClick', {slot: index}, result => {
-        if (result && !result.ok) alert(result.error);
+      socket.emit('clickSlot', item.slot, (result) => {
+        if (!result || !result.ok) {
+          alert(result && result.error
+            ? result.error
+            : 'Không thể thao tác slot này');
+        }
       });
     });
 
-    $('inventory').appendChild(button);
+    container.appendChild(button);
   });
+}
+
+function showResult(result) {
+  if (!result || !result.ok) {
+    alert(result && result.error ? result.error : 'Thao tác thất bại');
+  }
 }
 
 socket.on('connect', () => {
   addLog({
     time: new Date().toLocaleTimeString('vi-VN'),
-    type: 'info',
-    message: 'Dashboard đã kết nối.'
+    type: 'system',
+    message: 'Dashboard đã kết nối'
   });
 });
 
-socket.on('status', showStatus);
-socket.on('log', addLog);
-socket.on('chat', addChat);
-socket.on('window', showWindow);
+socket.on('initialState', (data) => {
+  setStatus(data.state.status);
 
-socket.on('initial', data => {
+  $('serverInfo').textContent =
+    'Server: ' + data.state.host + ':' + data.state.port +
+    ' | Username: ' + data.state.username;
+
   (data.logs || []).forEach(addLog);
-  (data.chat || []).forEach(addChat);
-  if (data.status) showStatus(data.status);
-  if (data.window) showWindow(data.window);
+  renderWindow(data.windowData || { title: 'Inventory', items: [] });
 });
 
-$('commandForm').addEventListener('submit', event => {
+socket.on('status', setStatus);
+socket.on('log', addLog);
+socket.on('windowData', renderWindow);
+
+socket.on('playerChat', (data) => {
+  addChat(data.username, data.message);
+});
+
+$('connect').addEventListener('click', () => {
+  socket.emit('connectBot', showResult);
+});
+
+$('disconnect').addEventListener('click', () => {
+  socket.emit('disconnectBot', showResult);
+});
+
+$('refresh').addEventListener('click', () => {
+  socket.emit('refreshInventory', showResult);
+});
+
+$('closeWindow').addEventListener('click', () => {
+  socket.emit('closeWindow', showResult);
+});
+
+$('chatForm').addEventListener('submit', (event) => {
   event.preventDefault();
 
-  const input = $('command');
-  const command = input.value.trim();
-  if (!command) return;
+  const input = $('chatInput');
+  const message = input.value.trim();
 
-  socket.emit('command', command, result => {
-    if (result && !result.ok) alert(result.error);
+  if (!message) return;
+
+  socket.emit('sendChat', message, (result) => {
+    if (result && result.ok) {
+      input.value = '';
+    } else {
+      showResult(result);
+    }
   });
-
-  input.value = '';
 });
-
-$('refresh').addEventListener('click', () => socket.emit('requestStatus'));
-$('reconnect').addEventListener('click', () => socket.emit('reconnectBot'));
 </script>
 </body>
 </html>`;
 
-app.get('/', (_req, res) => {
-  res.type('html').send(dashboardHtml);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Dashboard running on port ${PORT}`);
+
+  addLog('system', `Dashboard chạy tại port ${PORT}`);
+
+  // Automatically try to join the server when the web service starts.
+  connectBot();
 });
 
-app.get('/healthz', (_req, res) => {
-  res.json({ok: true, state: botState});
-});
-
-app.get('/api/status', (_req, res) => {
-  res.json(getStatus());
-});
-
-io.on('connection', socket => {
-  socket.emit('initial', {
-    logs,
-    chat: chatHistory,
-    status: getStatus(),
-    window: getWindowSnapshot()
-  });
-
-  socket.on('requestStatus', () => {
-    socket.emit('status', getStatus());
-  });
-
-  socket.on('command', (raw, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const command = String(raw || '').trim();
-
-    if (!command) return reply({ok: false, error: 'Chưa nhập lệnh.'});
-    if (command.length > 256) return reply({ok: false, error: 'Lệnh quá dài.'});
-    if (!bot || botState !== 'online') {
-      return reply({ok: false, error: 'Bot chưa kết nối Minecraft.'});
-    }
-
-    try {
-      bot.chat(command);
-      log('info', 'Đã gửi chat/lệnh từ dashboard.');
-      reply({ok: true});
-    } catch (error) {
-      reply({ok: false, error: error.message});
-    }
-  });
-
-  socket.on('windowClick', (payload, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const slot = Number(payload?.slot);
-
-    if (!bot || botState !== 'online' || !bot.currentWindow) {
-      return reply({ok: false, error: 'Không có giao diện đang mở.'});
-    }
-
-    if (!Number.isInteger(slot) || slot < 0 ||
-        slot >= bot.currentWindow.slots.length) {
-      return reply({ok: false, error: 'Ô vật phẩm không hợp lệ.'});
-    }
-
-    try {
-      bot.clickWindow(slot, 0, 0);
-      reply({ok: true});
-    } catch (error) {
-      reply({ok: false, error: error.message});
-    }
-  });
-
-  socket.on('reconnectBot', () => {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-
-    const oldBot = bot;
-    bot = null;
-    botState = 'offline';
-
-    if (antiAfkTimer) clearInterval(antiAfkTimer);
-    antiAfkTimer = null;
-
-    if (oldBot) {
-      try {
-        oldBot.quit('Dashboard reconnect');
-      } catch (_) {
-        // Kết nối đã đóng.
-      }
-    }
-
-    log('info', 'Đang yêu cầu kết nối lại bot.');
-    setTimeout(createBot, 500);
-  });
-});
-
-setInterval(() => {
-  io.emit('status', getStatus());
-}, 3000).unref();
-
-server.listen(CONFIG.webPort, CONFIG.webHost, () => {
-  log('success', `Dashboard chạy tại ${CONFIG.webHost}:${CONFIG.webPort}`);
-  log('info', `Máy chủ Minecraft: ${CONFIG.host}:${CONFIG.port}`);
-  createBot();
-});
-
-function shutdown(signal) {
-  log('warn', `Đang tắt dịch vụ (${signal}).`);
+process.on('SIGTERM', () => {
   reconnectEnabled = false;
-  stopTimers();
+  manualDisconnect = true;
+  clearReconnectTimer();
 
-  if (bot) {
-    try {
-      bot.quit('Server shutdown');
-    } catch (_) {
-      // Bỏ qua lỗi khi tắt.
-    }
-    bot = null;
-  }
+  try {
+    if (bot) bot.quit();
+  } catch (_) {}
 
   server.close(() => process.exit(0));
+
   setTimeout(() => process.exit(0), 5000).unref();
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-
+});
