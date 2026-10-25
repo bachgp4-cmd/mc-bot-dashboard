@@ -1,19 +1,11 @@
-```json
 {
   "name": "mc-bot-dashboard",
   "version": "1.0.0",
-  "description": "Minecraft Mineflayer bot with real-time Express and Socket.IO dashboard",
+  "description": "Minecraft Mineflayer bot with Express and Socket.IO dashboard",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [
-    "minecraft",
-    "mineflayer",
-    "bot",
-    "dashboard",
-    "socket.io"
-  ],
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
@@ -24,4 +16,3 @@
     "socket.io": "^4.8.1"
   }
 }
-```
