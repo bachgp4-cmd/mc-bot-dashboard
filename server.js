@@ -20,7 +20,7 @@ const BOT_CONFIG = {
 let bot = null;
 let antiAfkInterval = null;
 
-// Giao diện Web Dashboard (Giữ nguyên giao diện trực quan + Tích hợp Live Chat)
+// Giao diện Web Dashboard (Giao diện cũ đầy đủ tọa độ, player, trạng thái + Live Chat)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -33,20 +33,23 @@ app.get('/', (req, res) => {
       <style>
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
-        .container { max-width: 950px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .container { max-width: 1000px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         h2 { margin-top: 0; color: #4caf50; display: flex; align-items: center; justify-content: space-between; }
         
-        .dashboard-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; }
+        .status-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
+        .stat-card { background: #2a2a2a; padding: 12px; border-radius: 6px; border-left: 4px solid #4caf50; font-size: 14px; }
+        .stat-card b { color: #4caf50; display: block; margin-top: 4px; font-size: 16px; }
+
+        .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
-        .panel { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px; height: 380px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
-        .panel-title { font-weight: bold; margin-bottom: 8px; color: #aaa; border-bottom: 1px solid #333; padding-bottom: 4px; display: flex; justify-content: space-between; }
+        .panel { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px; height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+        .panel-title { font-weight: bold; margin-bottom: 8px; color: #aaa; border-bottom: 1px solid #333; padding-bottom: 4px; }
         
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #111; padding-bottom: 2px; }
         .chat-entry { color: #64ffda; margin-bottom: 4px; }
 
-        .control-section { margin-top: 15px; background: #2a2a2a; padding: 15px; border-radius: 6px; }
-        .chat-box { display: flex; gap: 10px; }
+        .control-section { margin-top: 15px; background: #2a2a2a; padding: 15px; border-radius: 6px; display: flex; gap: 10px; }
         input[type="text"] { flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #444; background: #1a1a1a; color: #fff; font-size: 15px; outline: none; }
         input[type="text"]:focus { border-color: #4caf50; }
         button { padding: 12px 24px; border: none; border-radius: 6px; background: #4caf50; color: white; cursor: pointer; font-weight: bold; font-size: 15px; transition: background 0.2s; }
@@ -61,26 +64,29 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="status">Online 24/7</span>
         </h2>
         
+        <!-- Bảng trạng thái trực quan -->
+        <div class="status-bar">
+          <div class="stat-card">Trạng thái<b id="botStatus">Đang kết nối...</b></div>
+          <div class="stat-card">Tọa độ (X, Y, Z)<b id="botCoords">Đang cập nhật...</b></div>
+          <div class="stat-card">Máu & Đói<b id="botHealth">❤️ -- | 🍖 --</b></div>
+          <div class="stat-card">Người chơi gần nhất<b id="nearestPlayer">Không có</b></div>
+        </div>
+
         <div class="dashboard-grid">
-          <!-- Cột bên trái: Nhật ký hệ thống (System Logs) -->
           <div>
-            <div class="panel-title"><span>📜 Nhật ký hệ thống</span></div>
+            <div class="panel-title">📜 Nhật ký hệ thống</div>
             <div id="logs" class="panel"></div>
           </div>
-
-          <!-- Cột bên phải: Chat thời gian thực trong game (Live Chat) -->
           <div>
-            <div class="panel-title"><span>💬 Chat trong game</span></div>
+            <div class="panel-title">💬 Chat trong game</div>
             <div id="gameChat" class="panel"></div>
           </div>
         </div>
 
-        <!-- Khung gửi lệnh / Chat điều khiển từ xa -->
+        <!-- Khung gửi lệnh -->
         <div class="control-section">
-          <div class="chat-box">
-            <input type="text" id="cmdInput" placeholder="Nhập lệnh (VD: /spawn, /home) hoặc chat..." onkeypress="handleKeyPress(event)" />
-            <button onclick="sendCommand()">Gửi lệnh</button>
-          </div>
+          <input type="text" id="cmdInput" placeholder="Nhập lệnh (VD: /menu, /afk, /spawn) hoặc chat..." onkeypress="handleKeyPress(event)" />
+          <button onclick="sendCommand()">Gửi lệnh</button>
         </div>
       </div>
 
@@ -103,6 +109,14 @@ app.get('/', (req, res) => {
           item.textContent = msg;
           chatDiv.appendChild(item);
           chatDiv.scrollTop = chatDiv.scrollHeight;
+        });
+
+        // Cập nhật thông số trạng thái, tọa độ realtime từ server gửi về
+        socket.on('update_stats', (data) => {
+          document.getElementById('botStatus').textContent = data.status;
+          document.getElementById('botCoords').textContent = data.coords;
+          document.getElementById('botHealth').textContent = \`❤️ \${data.health} | 🍖 \${data.food}\`;
+          document.getElementById('nearestPlayer').textContent = data.nearestPlayer;
         });
 
         function sendCommand() {
@@ -130,7 +144,29 @@ function logToWeb(msg) {
   io.emit('log', formatted);
 }
 
-// Khởi tạo bot Mineflayer
+// Gửi thông tin trạng thái tọa độ định kỳ về Web Dashboard
+function sendStatsToWeb() {
+  if (!bot || !bot.entity) return;
+  const pos = bot.entity.position;
+  const coords = \`X: \${pos.x.toFixed(1)}, Y: \${pos.y.toFixed(1)}, Z: \${pos.z.toFixed(1)}\`;
+  
+  // Tìm player gần nhất
+  let nearestPlayerName = "Không có";
+  const filterPlayer = (p) => p.username !== bot.username;
+  const player = bot.players ? Object.values(bot.players).find(p => p.entity && filterPlayer(p)) : null;
+  if (player) {
+    nearestPlayerName = player.username;
+  }
+
+  io.emit('update_stats', {
+    status: 'Đang hoạt động (Online)',
+    coords: coords,
+    health: bot.health || 20,
+    food: bot.food || 20,
+    nearestPlayer: nearestPlayerName
+  });
+}
+
 function startBot() {
   logToWeb("🔄 Đang khởi động kết nối tới kingmc.vn với tên _caubemocoi_...");
 
@@ -140,7 +176,6 @@ function startBot() {
     version: BOT_CONFIG.version
   });
 
-  // 1. Nhận tin nhắn chat trong game đẩy riêng sang cột Live Chat
   bot.on('message', (jsonMsg) => {
     const rawText = jsonMsg.toString().trim();
     if (rawText) {
@@ -148,42 +183,49 @@ function startBot() {
     }
   });
 
-  // 2. Xử lý khi Bot Spawn vào Server
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã kết nối vào server thành công!");
 
+    // Tự động đăng nhập và mở menu chọn server
     setTimeout(() => {
       bot.chat(`/login ${BOT_CONFIG.password}`);
       logToWeb(`🔐 Đã gửi lệnh /login`);
-    }, 4000);
+
+      setTimeout(() => {
+        bot.chat('/menu');
+        logToWeb(`📋 Đã gõ lệnh /menu để mở bảng chọn server`);
+      }, 3000);
+    }, 3000);
   });
 
-  // 3. Tự động tương tác Menu GUI (Chọn KingSMP và AFK Slot 6)
+  // Tương tác Menu GUI
   bot.on('windowOpen', async (window) => {
-    const title = window.title ? window.title.toString() : '';
-    logToWeb(`📋 Mở Menu/GUI: "${title}"`);
+    const title = window.title ? window.title.toString() : 'GUI';
+    logToWeb(`📋 Phát hiện mở Menu: "${title}" (Tổng ô: ${window.slots.length})`);
 
-    if (window.slots.length >= 25 && window.slots[24]) {
+    // Chọn Slot 24 vào KingSMP
+    if (window.slots.length >= 25) {
       setTimeout(() => {
         bot.clickWindow(24, 0, 0);
-        logToWeb("👉 Đã click Slot 24 vào KingSMP!");
-        
+        logToWeb("👉 Đã click Slot 24 (KingSMP)!");
+
         setTimeout(() => {
           bot.chat('/afk');
           logToWeb("💬 Đã gửi lệnh /afk");
-        }, 5000);
-      }, 2000);
+        }, 4000);
+      }, 1500);
     }
 
-    if (window.slots.length >= 7 && window.slots[6]) {
+    // Nếu là menu /afk -> Chọn Slot 6
+    if (window.slots.length >= 7 && window.slots.length < 25) {
       setTimeout(() => {
         bot.clickWindow(6, 0, 0);
-        logToWeb("🎯 Đã chọn Slot 6 AFK thành công!");
+        logToWeb("🎯 Đã click Slot 6 trong bảng AFK!");
       }, 1500);
     }
   });
 
-  // 4. Vòng lặp Anti-AFK (Nhảy mỗi 40s)
+  // Vòng lặp Anti-AFK & cập nhật tọa độ mỗi 3 giây
   if (antiAfkInterval) clearInterval(antiAfkInterval);
   antiAfkInterval = setInterval(() => {
     if (bot && bot.entity) {
@@ -191,7 +233,8 @@ function startBot() {
       setTimeout(() => bot.setControlState('jump', false), 500);
       logToWeb("⚡ Anti-AFK: Đã nhảy!");
     }
-  }, 40000);
+    sendStatsToWeb();
+  }, 3000);
 
   bot.on('error', (err) => logToWeb(`❌ Lỗi: ${err.message}`));
   bot.on('end', () => {
@@ -201,7 +244,6 @@ function startBot() {
   });
 }
 
-// Lắng nghe lệnh từ Web gửi vào game
 io.on('connection', (socket) => {
   socket.on('send_command', (cmd) => {
     if (bot) {
