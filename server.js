@@ -9,11 +9,11 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 10000;
 
-// Cấu hình thông tin bot
+// Cấu hình thông tin bot chính xác với tên _caubemocoi_
 const BOT_CONFIG = {
   host: 'kingmc.vn',
-  username: 'ChuThaiPhong', // Thay bằng tên tài khoản của bạn nếu khác
-  password: 'phong123@',  // Mật khẩu đăng nhập
+  username: '_caubemocoi_',
+  password: 'phong123@',
   version: '1.20.1'
 };
 
@@ -106,7 +106,7 @@ function logToWeb(msg) {
 
 // Khởi tạo bot Mineflayer
 function startBot() {
-  logToWeb("🔄 Đang khởi động kết nối tới server kingmc.vn...");
+  logToWeb("🔄 Đang khởi động kết nối tới server kingmc.vn với tên _caubemocoi_...");
 
   bot = mineflayer.createBot({
     host: BOT_CONFIG.host,
@@ -180,7 +180,7 @@ function startBot() {
   });
 }
 
-// Lắng nghe sự kiện từ Web Dashboard
+// Lắng nghe sự kiện từ Web Dashboard để gửi lệnh/chat vào game
 io.on('connection', (socket) => {
   socket.on('send_command', (cmd) => {
     if (bot) {
