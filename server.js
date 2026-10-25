@@ -9,7 +9,7 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 10000;
 
-// Cấu hình thông tin bot
+// 1. Cấu hình thông tin Bot & Server
 const BOT_CONFIG = {
   host: 'kingmc.vn',
   username: '_caubemocoi_',
@@ -20,13 +20,21 @@ const BOT_CONFIG = {
 let bot = null;
 let antiAfkInterval = null;
 
-// Biến cờ (Flags) chống lặp
+// 2. Các biến cờ (Flags) chống lặp lệnh tuyệt đối
 let hasLoggedIn = false;
 let hasOpenedMenu = false;
 let hasSelectedKingSMP = false;
 let hasSelectedAfkSlot = false;
 
-// Giao diện Web Dashboard
+// Reset toàn bộ cờ trạng thái khi bot ngắt kết nối hoặc khởi động lại
+function resetFlags() {
+  hasLoggedIn = false;
+  hasOpenedMenu = false;
+  hasSelectedKingSMP = false;
+  hasSelectedAfkSlot = false;
+}
+
+// 3. Web Dashboard (Express + Socket.io UI)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -42,19 +50,22 @@ app.get('/', (req, res) => {
         .container { max-width: 1000px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         h2 { margin-top: 0; color: #4caf50; display: flex; align-items: center; justify-content: space-between; }
         
+        /* Status Bar */
         .status-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
         .stat-card { background: #2a2a2a; padding: 12px; border-radius: 6px; border-left: 4px solid #4caf50; font-size: 14px; }
         .stat-card b { color: #4caf50; display: block; margin-top: 4px; font-size: 16px; }
 
+        /* Grid Layout */
         .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } .status-bar { grid-template-columns: 1fr 1fr; } }
 
-        .panel { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px; height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+        .panel { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px; height: 320px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
         .panel-title { font-weight: bold; margin-bottom: 8px; color: #aaa; border-bottom: 1px solid #333; padding-bottom: 4px; }
         
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #111; padding-bottom: 2px; }
-        .chat-entry { color: #64ffda; margin-bottom: 4px; }
+        .chat-entry { color: #64ffda; margin-bottom: 4px; border-bottom: 1px solid #111; padding-bottom: 2px; }
 
+        /* Controls */
         .control-section { margin-top: 15px; background: #2a2a2a; padding: 15px; border-radius: 6px; display: flex; gap: 10px; }
         input[type="text"] { flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #444; background: #1a1a1a; color: #fff; font-size: 15px; outline: none; }
         input[type="text"]:focus { border-color: #4caf50; }
@@ -70,6 +81,7 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="status">Online 24/7</span>
         </h2>
         
+        <!-- Thanh trạng thái trực quan -->
         <div class="status-bar">
           <div class="stat-card">Trạng thái<b id="botStatus">Đang kết nối...</b></div>
           <div class="stat-card">Tọa độ (X, Y, Z)<b id="botCoords">Đang cập nhật...</b></div>
@@ -77,6 +89,7 @@ app.get('/', (req, res) => {
           <div class="stat-card">Người chơi gần nhất<b id="nearestPlayer">Không có</b></div>
         </div>
 
+        <!-- Chia đôi màn hình Monitor -->
         <div class="dashboard-grid">
           <div>
             <div class="panel-title">📜 Nhật ký hệ thống</div>
@@ -88,8 +101,9 @@ app.get('/', (req, res) => {
           </div>
         </div>
 
+        <!-- Khung gửi lệnh / Chat -->
         <div class="control-section">
-          <input type="text" id="cmdInput" placeholder="Nhập lệnh (VD: /menu, /afk, /spawn) hoặc chat..." onkeypress="handleKeyPress(event)" />
+          <input type="text" id="cmdInput" placeholder="Nhập lệnh (VD: /menu, /afk, /spawn) hoặc tin nhắn..." onkeypress="handleKeyPress(event)" />
           <button onclick="sendCommand()">Gửi lệnh</button>
         </div>
       </div>
@@ -140,42 +154,45 @@ app.get('/', (req, res) => {
   `);
 });
 
+// Hàm hỗ trợ truyền Log thời gian thực về Web
 function logToWeb(msg) {
   const time = new Date().toLocaleTimeString('vi-VN');
-  const formatted = `[${time}] ${msg}`;
+  const formatted = '[' + time + '] ' + msg;
   console.log(formatted);
   io.emit('log', formatted);
 }
 
+// 4. Thu thập dữ liệu Telemetry (Tọa độ, Máu, Người chơi) gửi về Dashboard
 function sendStatsToWeb() {
   if (!bot || !bot.entity) return;
+
   const pos = bot.entity.position;
-  const coords = `X: ${pos.x.toFixed(1)}, Y: ${pos.y.toFixed(1)}, Z: ${pos.z.toFixed(1)}`;
+  const coords = 'X: ' + pos.x.toFixed(1) + ', Y: ' + pos.y.toFixed(1) + ', Z: ' + pos.z.toFixed(1);
   
   let nearestPlayerName = "Không có";
-  const filterPlayer = (p) => p.username !== bot.username;
-  const player = bot.players ? Object.values(bot.players).find(p => p.entity && filterPlayer(p)) : null;
-  if (player) {
-    nearestPlayerName = player.username;
+  if (bot.players) {
+    const filterPlayer = (p) => p.username !== bot.username;
+    const player = Object.values(bot.players).find(p => p.entity && filterPlayer(p));
+    if (player) {
+      nearestPlayerName = player.username;
+    }
   }
 
   io.emit('update_stats', {
     status: 'Đang hoạt động (Online)',
     coords: coords,
-    health: bot.health || 20,
-    food: bot.food || 20,
+    health: bot.health !== undefined ? bot.health : 20,
+    food: bot.food !== undefined ? bot.food : 20,
     nearestPlayer: nearestPlayerName
   });
 }
 
+// 5. Khởi tạo & Điều khiển Bot Mineflayer
 function startBot() {
   logToWeb("🔄 Đang khởi động kết nối tới kingmc.vn với tên _caubemocoi_...");
-
-  // Reset cờ mỗi khi kết nối mới
-  hasLoggedIn = false;
-  hasOpenedMenu = false;
-  hasSelectedKingSMP = false;
-  hasSelectedAfkSlot = false;
+  
+  // Khôi phục lại trạng thái cờ ban đầu
+  resetFlags();
 
   bot = mineflayer.createBot({
     host: BOT_CONFIG.host,
@@ -183,6 +200,7 @@ function startBot() {
     version: BOT_CONFIG.version
   });
 
+  // Sự kiện nhận Live Chat trong game
   bot.on('message', (jsonMsg) => {
     const rawText = jsonMsg.toString().trim();
     if (rawText) {
@@ -190,38 +208,40 @@ function startBot() {
     }
   });
 
+  // Sự kiện Bot Spawn (Kết nối vào game)
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã kết nối vào server thành công!");
 
-    // Chỉ thực hiện đăng nhập 1 lần duy nhất khi spawn
+    // Đăng nhập 1 lần duy nhất bằng cờ hasLoggedIn
     if (!hasLoggedIn) {
       hasLoggedIn = true;
       setTimeout(() => {
-        bot.chat(`/login ${BOT_CONFIG.password}`);
-        logToWeb(`🔐 Đã gửi lệnh /login`);
+        bot.chat('/login ' + BOT_CONFIG.password);
+        logToWeb("🔐 Đã gửi lệnh /login " + BOT_CONFIG.password);
 
+        // Mở Menu chọn server 1 lần duy nhất bằng cờ hasOpenedMenu
         setTimeout(() => {
           if (!hasOpenedMenu) {
             hasOpenedMenu = true;
             bot.chat('/menu');
-            logToWeb(`📋 Đã gõ lệnh /menu để mở bảng chọn server`);
+            logToWeb("📋 Đã gõ lệnh /menu để mở bảng chọn server");
           }
         }, 3000);
       }, 3000);
     }
   });
 
-  // Tương tác Menu GUI phân biệt rõ ràng bằng số lượng ô (slots)
+  // Sự kiện Tương tác GUI / Menu Window (Phân loại chính xác dựa theo slots.length)
   bot.on('windowOpen', async (window) => {
-    const title = window.title ? window.title.toString() : 'GUI';
-    logToWeb(`📋 Phát hiện mở Menu (Tổng ô: ${window.slots.length})`);
+    const totalSlots = window.slots.length;
+    logToWeb("📋 Phát hiện mở Menu GUI (Tổng số ô: " + totalSlots + ")");
 
-    // 1. Nếu là Menu chính (90 ô) -> Chọn Slot 24 vào KingSMP
-    if (window.slots.length === 90 && !hasSelectedKingSMP) {
+    // 1. Menu chính (Tổng ô = 90) -> Click Slot 24 vào KingSMP
+    if (totalSlots === 90 && !hasSelectedKingSMP) {
       hasSelectedKingSMP = true;
       setTimeout(() => {
         bot.clickWindow(24, 0, 0);
-        logToWeb("👉 Đã click Slot 24 (KingSMP)!");
+        logToWeb("👉 Đã click Slot 24 vào KingSMP thành công!");
 
         setTimeout(() => {
           bot.chat('/afk');
@@ -230,8 +250,8 @@ function startBot() {
       }, 1500);
     }
 
-    // 2. Nếu là Menu chọn khu AFK (63 ô) -> Chọn Slot 6
-    if (window.slots.length === 63 && !hasSelectedAfkSlot) {
+    // 2. Menu chọn khu AFK (Tổng ô = 63) -> Click Slot 6 vào khu AFK
+    if (totalSlots === 63 && !hasSelectedAfkSlot) {
       hasSelectedAfkSlot = true;
       setTimeout(() => {
         bot.clickWindow(6, 0, 0);
@@ -240,6 +260,7 @@ function startBot() {
     }
   });
 
+  // Vòng lặp Anti-AFK (Nhảy ngắn mỗi 30s) & Cập nhật Telemetry
   if (antiAfkInterval) clearInterval(antiAfkInterval);
   antiAfkInterval = setInterval(() => {
     if (bot && bot.entity) {
@@ -250,27 +271,32 @@ function startBot() {
     sendStatsToWeb();
   }, 30000);
 
-  bot.on('error', (err) => logToWeb(`❌ Lỗi: ${err.message}`));
+  // Xử lý Lỗi & Tự động kết nối lại (Auto-Reconnect)
+  bot.on('error', (err) => logToWeb("❌ Lỗi Bot: " + err.message));
+  
   bot.on('end', () => {
-    logToWeb("⚠️ Bot bị ngắt kết nối. Đang tự động kết nối lại sau 10 giây...");
+    logToWeb("⚠️ Bot bị ngắt kết nối. Reset cờ và tự động kết nối lại sau 10 giây...");
     if (antiAfkInterval) clearInterval(antiAfkInterval);
+    resetFlags();
     setTimeout(startBot, 10000);
   });
 }
 
+// 6. Lắng nghe lệnh trực tiếp từ Web gửi vào Minecraft
 io.on('connection', (socket) => {
   socket.on('send_command', (cmd) => {
     if (bot) {
       bot.chat(cmd);
-      logToWeb(`📤 [Web gửi]: ${cmd}`);
+      logToWeb("📤 [Web gửi]: " + cmd);
     } else {
-      socket.emit('log', '⚠️ Bot chưa sẵn sàng!');
+      socket.emit('log', "⚠️ Bot chưa sẵn sàng hoặc đang mất kết nối!");
     }
   });
 });
 
+// Kích hoạt dịch vụ
 startBot();
 
 server.listen(PORT, () => {
-  console.log(`Server Dashboard đang chạy tại cổng ${PORT}`);
+  console.log("Server Dashboard đang chạy hoàn hảo tại cổng " + PORT);
 });
