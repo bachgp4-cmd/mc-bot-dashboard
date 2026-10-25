@@ -20,7 +20,7 @@ const BOT_CONFIG = {
 let bot = null;
 let antiAfkInterval = null;
 
-// Giao diện Web Dashboard (Giao diện cũ đầy đủ tọa độ, player, trạng thái + Live Chat)
+// Giao diện Web Dashboard
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -64,7 +64,6 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="status">Online 24/7</span>
         </h2>
         
-        <!-- Bảng trạng thái trực quan -->
         <div class="status-bar">
           <div class="stat-card">Trạng thái<b id="botStatus">Đang kết nối...</b></div>
           <div class="stat-card">Tọa độ (X, Y, Z)<b id="botCoords">Đang cập nhật...</b></div>
@@ -83,7 +82,6 @@ app.get('/', (req, res) => {
           </div>
         </div>
 
-        <!-- Khung gửi lệnh -->
         <div class="control-section">
           <input type="text" id="cmdInput" placeholder="Nhập lệnh (VD: /menu, /afk, /spawn) hoặc chat..." onkeypress="handleKeyPress(event)" />
           <button onclick="sendCommand()">Gửi lệnh</button>
@@ -111,11 +109,10 @@ app.get('/', (req, res) => {
           chatDiv.scrollTop = chatDiv.scrollHeight;
         });
 
-        // Cập nhật thông số trạng thái, tọa độ realtime từ server gửi về
         socket.on('update_stats', (data) => {
           document.getElementById('botStatus').textContent = data.status;
           document.getElementById('botCoords').textContent = data.coords;
-          document.getElementById('botHealth').textContent = \`❤️ \${data.health} | 🍖 \${data.food}\`;
+          document.getElementById('botHealth').textContent = '❤️ ' + data.health + ' | 🍖 ' + data.food;
           document.getElementById('nearestPlayer').textContent = data.nearestPlayer;
         });
 
@@ -144,13 +141,11 @@ function logToWeb(msg) {
   io.emit('log', formatted);
 }
 
-// Gửi thông tin trạng thái tọa độ định kỳ về Web Dashboard
 function sendStatsToWeb() {
   if (!bot || !bot.entity) return;
   const pos = bot.entity.position;
-  const coords = \`X: \${pos.x.toFixed(1)}, Y: \${pos.y.toFixed(1)}, Z: \${pos.z.toFixed(1)}\`;
+  const coords = `X: ${pos.x.toFixed(1)}, Y: ${pos.y.toFixed(1)}, Z: ${pos.z.toFixed(1)}`;
   
-  // Tìm player gần nhất
   let nearestPlayerName = "Không có";
   const filterPlayer = (p) => p.username !== bot.username;
   const player = bot.players ? Object.values(bot.players).find(p => p.entity && filterPlayer(p)) : null;
@@ -186,7 +181,6 @@ function startBot() {
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã kết nối vào server thành công!");
 
-    // Tự động đăng nhập và mở menu chọn server
     setTimeout(() => {
       bot.chat(`/login ${BOT_CONFIG.password}`);
       logToWeb(`🔐 Đã gửi lệnh /login`);
@@ -198,12 +192,10 @@ function startBot() {
     }, 3000);
   });
 
-  // Tương tác Menu GUI
   bot.on('windowOpen', async (window) => {
     const title = window.title ? window.title.toString() : 'GUI';
     logToWeb(`📋 Phát hiện mở Menu: "${title}" (Tổng ô: ${window.slots.length})`);
 
-    // Chọn Slot 24 vào KingSMP
     if (window.slots.length >= 25) {
       setTimeout(() => {
         bot.clickWindow(24, 0, 0);
@@ -216,7 +208,6 @@ function startBot() {
       }, 1500);
     }
 
-    // Nếu là menu /afk -> Chọn Slot 6
     if (window.slots.length >= 7 && window.slots.length < 25) {
       setTimeout(() => {
         bot.clickWindow(6, 0, 0);
@@ -225,7 +216,6 @@ function startBot() {
     }
   });
 
-  // Vòng lặp Anti-AFK & cập nhật tọa độ mỗi 3 giây
   if (antiAfkInterval) clearInterval(antiAfkInterval);
   antiAfkInterval = setInterval(() => {
     if (bot && bot.entity) {
