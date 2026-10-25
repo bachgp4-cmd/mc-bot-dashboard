@@ -20,6 +20,12 @@ const BOT_CONFIG = {
 let bot = null;
 let antiAfkInterval = null;
 
+// Biến cờ (Flags) chống lặp
+let hasLoggedIn = false;
+let hasOpenedMenu = false;
+let hasSelectedKingSMP = false;
+let hasSelectedAfkSlot = false;
+
 // Giao diện Web Dashboard
 app.get('/', (req, res) => {
   res.send(`
@@ -165,6 +171,12 @@ function sendStatsToWeb() {
 function startBot() {
   logToWeb("🔄 Đang khởi động kết nối tới kingmc.vn với tên _caubemocoi_...");
 
+  // Reset cờ mỗi khi kết nối mới
+  hasLoggedIn = false;
+  hasOpenedMenu = false;
+  hasSelectedKingSMP = false;
+  hasSelectedAfkSlot = false;
+
   bot = mineflayer.createBot({
     host: BOT_CONFIG.host,
     username: BOT_CONFIG.username,
@@ -181,22 +193,32 @@ function startBot() {
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã kết nối vào server thành công!");
 
-    setTimeout(() => {
-      bot.chat(`/login ${BOT_CONFIG.password}`);
-      logToWeb(`🔐 Đã gửi lệnh /login`);
-
+    // Chỉ thực hiện đăng nhập 1 lần duy nhất khi spawn
+    if (!hasLoggedIn) {
+      hasLoggedIn = true;
       setTimeout(() => {
-        bot.chat('/menu');
-        logToWeb(`📋 Đã gõ lệnh /menu để mở bảng chọn server`);
+        bot.chat(`/login ${BOT_CONFIG.password}`);
+        logToWeb(`🔐 Đã gửi lệnh /login`);
+
+        setTimeout(() => {
+          if (!hasOpenedMenu) {
+            hasOpenedMenu = true;
+            bot.chat('/menu');
+            logToWeb(`📋 Đã gõ lệnh /menu để mở bảng chọn server`);
+          }
+        }, 3000);
       }, 3000);
-    }, 3000);
+    }
   });
 
+  // Tương tác Menu GUI phân biệt rõ ràng bằng số lượng ô (slots)
   bot.on('windowOpen', async (window) => {
     const title = window.title ? window.title.toString() : 'GUI';
-    logToWeb(`📋 Phát hiện mở Menu: "${title}" (Tổng ô: ${window.slots.length})`);
+    logToWeb(`📋 Phát hiện mở Menu (Tổng ô: ${window.slots.length})`);
 
-    if (window.slots.length >= 25) {
+    // 1. Nếu là Menu chính (90 ô) -> Chọn Slot 24 vào KingSMP
+    if (window.slots.length === 90 && !hasSelectedKingSMP) {
+      hasSelectedKingSMP = true;
       setTimeout(() => {
         bot.clickWindow(24, 0, 0);
         logToWeb("👉 Đã click Slot 24 (KingSMP)!");
@@ -208,10 +230,12 @@ function startBot() {
       }, 1500);
     }
 
-    if (window.slots.length >= 7 && window.slots.length < 25) {
+    // 2. Nếu là Menu chọn khu AFK (63 ô) -> Chọn Slot 6
+    if (window.slots.length === 63 && !hasSelectedAfkSlot) {
+      hasSelectedAfkSlot = true;
       setTimeout(() => {
         bot.clickWindow(6, 0, 0);
-        logToWeb("🎯 Đã click Slot 6 trong bảng AFK!");
+        logToWeb("🎯 Đã chọn thành công Slot số 6 của /afk!");
       }, 1500);
     }
   });
@@ -224,7 +248,7 @@ function startBot() {
       logToWeb("⚡ Anti-AFK: Đã nhảy!");
     }
     sendStatsToWeb();
-  }, 3000);
+  }, 30000);
 
   bot.on('error', (err) => logToWeb(`❌ Lỗi: ${err.message}`));
   bot.on('end', () => {
