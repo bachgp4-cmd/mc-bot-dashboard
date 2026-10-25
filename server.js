@@ -19,22 +19,9 @@ const BOT_CONFIG = {
 
 let bot = null;
 let antiAfkInterval = null;
-
-// 2. Các biến cờ (Flags) chống lặp lệnh tuyệt đối
 let hasLoggedIn = false;
-let hasOpenedMenu = false;
-let hasSelectedKingSMP = false;
-let hasSelectedAfkSlot = false;
 
-// Reset toàn bộ cờ trạng thái khi bot ngắt kết nối hoặc khởi động lại
-function resetFlags() {
-  hasLoggedIn = false;
-  hasOpenedMenu = false;
-  hasSelectedKingSMP = false;
-  hasSelectedAfkSlot = false;
-}
-
-// 3. Web Dashboard (Express + Socket.io UI)
+// 2. Web Dashboard (Giao diện giám sát & Điều khiển thủ công)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -81,7 +68,7 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="status">Online 24/7</span>
         </h2>
         
-        <!-- Thanh trạng thái trực quan -->
+        <!-- Thanh trạng thái -->
         <div class="status-bar">
           <div class="stat-card">Trạng thái<b id="botStatus">Đang kết nối...</b></div>
           <div class="stat-card">Tọa độ (X, Y, Z)<b id="botCoords">Đang cập nhật...</b></div>
@@ -89,7 +76,7 @@ app.get('/', (req, res) => {
           <div class="stat-card">Người chơi gần nhất<b id="nearestPlayer">Không có</b></div>
         </div>
 
-        <!-- Chia đôi màn hình Monitor -->
+        <!-- Màn hình giám sát (Logs & Chat) -->
         <div class="dashboard-grid">
           <div>
             <div class="panel-title">📜 Nhật ký hệ thống</div>
@@ -101,9 +88,9 @@ app.get('/', (req, res) => {
           </div>
         </div>
 
-        <!-- Khung gửi lệnh / Chat -->
+        <!-- Khung gửi lệnh / Chat thủ công -->
         <div class="control-section">
-          <input type="text" id="cmdInput" placeholder="Nhập lệnh (VD: /menu, /afk, /spawn) hoặc tin nhắn..." onkeypress="handleKeyPress(event)" />
+          <input type="text" id="cmdInput" placeholder="Nhập lệnh tự do (VD: /menu, /afk, /spawn) hoặc chat..." onkeypress="handleKeyPress(event)" />
           <button onclick="sendCommand()">Gửi lệnh</button>
         </div>
       </div>
@@ -154,7 +141,6 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Hàm hỗ trợ truyền Log thời gian thực về Web
 function logToWeb(msg) {
   const time = new Date().toLocaleTimeString('vi-VN');
   const formatted = '[' + time + '] ' + msg;
@@ -162,7 +148,7 @@ function logToWeb(msg) {
   io.emit('log', formatted);
 }
 
-// 4. Thu thập dữ liệu Telemetry (Tọa độ, Máu, Người chơi) gửi về Dashboard
+// Gửi Telemetry định kỳ về Web
 function sendStatsToWeb() {
   if (!bot || !bot.entity) return;
 
@@ -187,12 +173,9 @@ function sendStatsToWeb() {
   });
 }
 
-// 5. Khởi tạo & Điều khiển Bot Mineflayer
 function startBot() {
   logToWeb("🔄 Đang khởi động kết nối tới kingmc.vn với tên _caubemocoi_...");
-  
-  // Khôi phục lại trạng thái cờ ban đầu
-  resetFlags();
+  hasLoggedIn = false;
 
   bot = mineflayer.createBot({
     host: BOT_CONFIG.host,
@@ -200,7 +183,7 @@ function startBot() {
     version: BOT_CONFIG.version
   });
 
-  // Sự kiện nhận Live Chat trong game
+  // Bắt tin nhắn chat trong game
   bot.on('message', (jsonMsg) => {
     const rawText = jsonMsg.toString().trim();
     if (rawText) {
@@ -208,59 +191,20 @@ function startBot() {
     }
   });
 
-  // Sự kiện Bot Spawn (Kết nối vào game)
+  // Khi bot vào game thành công -> Chỉ tự động đăng nhập (/login) một lần duy nhất
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã kết nối vào server thành công!");
 
-    // Đăng nhập 1 lần duy nhất bằng cờ hasLoggedIn
     if (!hasLoggedIn) {
       hasLoggedIn = true;
       setTimeout(() => {
         bot.chat('/login ' + BOT_CONFIG.password);
-        logToWeb("🔐 Đã gửi lệnh /login " + BOT_CONFIG.password);
-
-        // Mở Menu chọn server 1 lần duy nhất bằng cờ hasOpenedMenu
-        setTimeout(() => {
-          if (!hasOpenedMenu) {
-            hasOpenedMenu = true;
-            bot.chat('/menu');
-            logToWeb("📋 Đã gõ lệnh /menu để mở bảng chọn server");
-          }
-        }, 3000);
+        logToWeb("🔐 Đã tự động gửi lệnh /login");
       }, 3000);
     }
   });
 
-  // Sự kiện Tương tác GUI / Menu Window (Phân loại chính xác dựa theo slots.length)
-  bot.on('windowOpen', async (window) => {
-    const totalSlots = window.slots.length;
-    logToWeb("📋 Phát hiện mở Menu GUI (Tổng số ô: " + totalSlots + ")");
-
-    // 1. Menu chính (Tổng ô = 90) -> Click Slot 24 vào KingSMP
-    if (totalSlots === 90 && !hasSelectedKingSMP) {
-      hasSelectedKingSMP = true;
-      setTimeout(() => {
-        bot.clickWindow(24, 0, 0);
-        logToWeb("👉 Đã click Slot 24 vào KingSMP thành công!");
-
-        setTimeout(() => {
-          bot.chat('/afk');
-          logToWeb("💬 Đã gửi lệnh /afk");
-        }, 4000);
-      }, 1500);
-    }
-
-    // 2. Menu chọn khu AFK (Tổng ô = 63) -> Click Slot 6 vào khu AFK
-    if (totalSlots === 63 && !hasSelectedAfkSlot) {
-      hasSelectedAfkSlot = true;
-      setTimeout(() => {
-        bot.clickWindow(6, 0, 0);
-        logToWeb("🎯 Đã chọn thành công Slot số 6 của /afk!");
-      }, 1500);
-    }
-  });
-
-  // Vòng lặp Anti-AFK (Nhảy ngắn mỗi 30s) & Cập nhật Telemetry
+  // Vòng lặp Anti-AFK (Nhảy mỗi 30s) và cập nhật thông số
   if (antiAfkInterval) clearInterval(antiAfkInterval);
   antiAfkInterval = setInterval(() => {
     if (bot && bot.entity) {
@@ -271,18 +215,18 @@ function startBot() {
     sendStatsToWeb();
   }, 30000);
 
-  // Xử lý Lỗi & Tự động kết nối lại (Auto-Reconnect)
+  // Xử lý lỗi & Tự động kết nối lại khi mất mạng (Auto-Reconnect)
   bot.on('error', (err) => logToWeb("❌ Lỗi Bot: " + err.message));
   
   bot.on('end', () => {
-    logToWeb("⚠️ Bot bị ngắt kết nối. Reset cờ và tự động kết nối lại sau 10 giây...");
+    logToWeb("⚠️ Bot bị ngắt kết nối. Đang tự động kết nối lại sau 10 giây...");
     if (antiAfkInterval) clearInterval(antiAfkInterval);
-    resetFlags();
+    hasLoggedIn = false;
     setTimeout(startBot, 10000);
   });
 }
 
-// 6. Lắng nghe lệnh trực tiếp từ Web gửi vào Minecraft
+// Lắng nghe lệnh từ Web gửi vào game
 io.on('connection', (socket) => {
   socket.on('send_command', (cmd) => {
     if (bot) {
@@ -294,7 +238,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// Kích hoạt dịch vụ
 startBot();
 
 server.listen(PORT, () => {
