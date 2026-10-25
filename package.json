@@ -1,12 +1,12 @@
+
 {
   "name": "mc-bot-dashboard",
   "version": "1.0.0",
-  "description": "Minecraft Mineflayer bot with Express and Socket.IO dashboard",
+  "private": true,
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
   },
