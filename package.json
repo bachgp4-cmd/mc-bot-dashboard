@@ -2,7 +2,7 @@
 {
   "name": "mc-bot-dashboard",
   "version": "1.0.0",
-  "description": "Minecraft bot dashboard with manual controls and auto reconnect",
+  "description": "Minecraft bot dashboard",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
