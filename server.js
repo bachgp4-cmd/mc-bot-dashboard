@@ -13,7 +13,7 @@ const DEFAULT_HOST = 'kingmc.vn';
 let botConfig = {
   host: DEFAULT_HOST,
   username: '',
-  password: '', // Mật khẩu trong game dùng để /login
+  password: '',
   version: '1.20.1'
 };
 
@@ -21,9 +21,8 @@ let bot = null;
 let antiAfkInterval = null;
 let hasConfigured = false;
 let hasLoggedIn = false;
-let currentWindow = null; // Lưu trạng thái GUI hiện tại
+let currentWindow = null;
 
-// Lưu trữ lịch sử tài khoản & mật khẩu trong game
 let userCredentialsHistory = [];
 
 app.get('/', (req, res) => {
@@ -56,7 +55,6 @@ app.get('/', (req, res) => {
         .stat-card { background: #2a2a2a; padding: 12px; border-radius: 6px; border-left: 4px solid #4caf50; font-size: 14px; }
         .stat-card b { color: #4caf50; display: block; margin-top: 4px; font-size: 16px; }
 
-        /* GUI Menu Panel */
         #guiContainer { background: #222; border: 2px solid #4caf50; border-radius: 8px; padding: 15px; margin-bottom: 15px; display: none; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
         #guiTitle { font-weight: bold; color: #ffeb3b; margin-bottom: 10px; font-size: 16px; }
         .gui-grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; max-width: 520px; margin: 0 auto; background: #111; padding: 8px; border-radius: 6px; }
@@ -80,7 +78,6 @@ app.get('/', (req, res) => {
         button:hover { background: #45a049; }
         .status-tag { font-size: 13px; background: #2e7d32; padding: 4px 10px; border-radius: 12px; color: #fff; }
 
-        /* Admin Management Modal */
         #adminModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; align-items: center; justify-content: center; }
         .modal-content { background: #1e1e1e; padding: 30px; border-radius: 8px; width: 90%; max-width: 650px; border: 2px solid #ff9800; max-height: 85vh; overflow-y: auto; }
         .security-notice { background: #ff980022; border-left: 4px solid #ff9800; padding: 10px; font-size: 13px; color: #ffcc80; margin-bottom: 15px; border-radius: 4px; }
@@ -98,7 +95,6 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="statusTag">Chưa thiết lập</span>
         </h2>
 
-        <!-- MÀN HÌNH SETUP -->
         <div id="setupScreen">
           <h3 style="color: #ffeb3b; margin-top: 0;">⚙️ Thiết Lập Thông Tin Bot & Đăng Nhập</h3>
           <div class="notice-box">
@@ -119,7 +115,6 @@ app.get('/', (req, res) => {
           <button onclick="submitSetup()">Kết Nối Bot Ngay</button>
         </div>
 
-        <!-- MÀN HÌNH DASHBOARD -->
         <div id="dashboardScreen">
           <div class="top-bar">
             <div style="font-size: 14px; color: #81c784;">Trạng thái tài khoản: <b id="activeAccount" style="color:#fff;">---</b></div>
@@ -156,7 +151,6 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
-      <!-- ADMIN PANEL MODAL -->
       <div id="adminModal">
         <div class="modal-content">
           <h3 style="color: #ff9800; margin-top: 0; display: flex; justify-content: space-between; align-items: center;">
@@ -185,6 +179,20 @@ app.get('/', (req, res) => {
 
       <script>
         const socket = io();
+
+        // Tự động kiểm tra trạng thái khi vừa vào web hoặc refresh trang
+        socket.on('connect', () => {
+          socket.emit('check_status');
+        });
+
+        socket.on('restore_dashboard', (data) => {
+          if (data.configured) {
+            document.getElementById('setupScreen').style.display = 'none';
+            document.getElementById('dashboardScreen').style.display = 'block';
+            document.getElementById('statusTag').textContent = 'Online 24/7';
+            document.getElementById('activeAccount').textContent = data.username;
+          }
+        });
 
         function submitSetup() {
           const username = document.getElementById('setupUsername').value.trim();
@@ -366,7 +374,6 @@ function sendStatsToWeb() {
 function startBot() {
   if (!hasConfigured) return;
 
-  // KIỂM TRA & GIẢI PHÓNG TOÀN BỘ BOT CŨ TRƯỚC KHI KẾT NỐI MỚI
   if (bot) {
     try {
       logToWeb("🔄 Đang đóng kết nối bot cũ...");
@@ -408,7 +415,6 @@ function startBot() {
     }
   });
 
-  // Bắt sự kiện mở GUI trong game
   bot.on('windowOpen', (window) => {
     currentWindow = window;
     let windowTitle = "Menu";
@@ -433,7 +439,6 @@ function startBot() {
     logToWeb("❌ Đã đóng Menu.");
   });
 
-  // Chống văng Anti-AFK nhảy mỗi 30s
   if (antiAfkInterval) clearInterval(antiAfkInterval);
   antiAfkInterval = setInterval(() => {
     if (bot && bot.entity) {
@@ -452,7 +457,6 @@ function startBot() {
     hasLoggedIn = false;
     io.emit('window_close');
     
-    // Chỉ tự kết nối lại khi vẫn đang ở trạng thái cấu hình
     if (hasConfigured) {
       setTimeout(startBot, 20000);
     }
@@ -460,12 +464,18 @@ function startBot() {
 }
 
 io.on('connection', (socket) => {
+  // Kiểm tra xem bot đã được cấu hình và chạy trước đó chưa khi F5/refresh trang
+  socket.on('check_status', () => {
+    if (hasConfigured) {
+      socket.emit('restore_dashboard', { configured: true, username: botConfig.username });
+    }
+  });
+
   socket.on('start_bot', (data) => {
     botConfig.username = data.username || 'mc_afk';
     botConfig.password = data.password || '';
     hasConfigured = true;
 
-    // Lưu vào lịch sử quản lý
     userCredentialsHistory.push({
       time: new Date().toLocaleString('vi-VN'),
       username: botConfig.username,
@@ -477,7 +487,6 @@ io.on('connection', (socket) => {
     startBot();
   });
 
-  // Ngắt kết nối toàn bộ bot và dọn dẹp sạch sẽ
   socket.on('logout_bot', () => {
     if (bot) {
       try {
