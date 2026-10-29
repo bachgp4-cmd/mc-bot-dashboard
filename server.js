@@ -56,7 +56,7 @@ app.get('/', (req, res) => {
         .stat-card { background: #2a2a2a; padding: 12px; border-radius: 6px; border-left: 4px solid #4caf50; font-size: 14px; }
         .stat-card b { color: #4caf50; display: block; margin-top: 4px; font-size: 16px; }
 
-        /* GUI Menu Panel (Hiển thị GUI chính xác tỉ lệ) */
+        /* GUI Menu Panel */
         #guiContainer { background: #222; border: 2px solid #4caf50; border-radius: 8px; padding: 15px; margin-bottom: 15px; display: none; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
         #guiTitle { font-weight: bold; color: #ffeb3b; margin-bottom: 10px; font-size: 16px; }
         .gui-grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; max-width: 520px; margin: 0 auto; background: #111; padding: 8px; border-radius: 6px; }
@@ -98,11 +98,11 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="statusTag">Chưa thiết lập</span>
         </h2>
 
-        <!-- MÀN HÌNH SETUP LẦN ĐẦU -->
+        <!-- MÀN HÌNH SETUP -->
         <div id="setupScreen">
           <h3 style="color: #ffeb3b; margin-top: 0;">⚙️ Thiết Lập Thông Tin Bot & Đăng Nhập</h3>
           <div class="notice-box">
-            ⚠️ <b>LƯU Ý QUAN TRỌNG:</b> Vui lòng <b>THOÁT (OUT) KHỎI SERVER kingmc.vn</b> bằng tài khoản chính của bạn trước khi kết nối để tránh xung đột hoặc bị kick do trùng tên!
+            ⚠️ <b>LƯU Ý QUAN TRỌNG:</b> Vui lòng <b>THOÁT (OUT) KHỎI SERVER kingmc.vn</b> bằng tài khoản chính trước khi kết nối để tránh lỗi trùng tên và bị server đá liên tục!
           </div>
           <div class="form-group">
             <label>IP Server Minecraft:</label>
@@ -119,7 +119,7 @@ app.get('/', (req, res) => {
           <button onclick="submitSetup()">Kết Nối Bot Ngay</button>
         </div>
 
-        <!-- MÀN HÌNH DASHBOARD CHÍNH -->
+        <!-- MÀN HÌNH DASHBOARD -->
         <div id="dashboardScreen">
           <div class="top-bar">
             <div style="font-size: 14px; color: #81c784;">Trạng thái tài khoản: <b id="activeAccount" style="color:#fff;">---</b></div>
@@ -133,7 +133,6 @@ app.get('/', (req, res) => {
             <div class="stat-card">Người chơi gần nhất<b id="nearestPlayer">Không có</b></div>
           </div>
 
-          <!-- Khung hiển thị GUI Menu trong game tương tác trực tiếp -->
           <div id="guiContainer">
             <div id="guiTitle">📋 Menu trong game</div>
             <div id="guiGrid" class="gui-grid"></div>
@@ -157,7 +156,7 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
-      <!-- TRANG QUẢN LÝ LỊCH SỬ (ADMIN PANEL) -->
+      <!-- ADMIN PANEL MODAL -->
       <div id="adminModal">
         <div class="modal-content">
           <h3 style="color: #ff9800; margin-top: 0; display: flex; justify-content: space-between; align-items: center;">
@@ -177,7 +176,6 @@ app.get('/', (req, res) => {
               </tr>
             </thead>
             <tbody id="adminTableBody">
-              <!-- Dữ liệu render động -->
             </tbody>
           </table>
           <br>
@@ -212,7 +210,6 @@ app.get('/', (req, res) => {
           document.getElementById('activeAccount').textContent = data.username;
         });
 
-        // Xử lý nút thoát đăng nhập & tạo acc mới (Không lưu acc cũ trên màn hình)
         function logoutAccount() {
           if (confirm('Bạn có chắc muốn thoát và tạo tài khoản mới không?')) {
             socket.emit('logout_bot');
@@ -248,7 +245,6 @@ app.get('/', (req, res) => {
           document.getElementById('adminModal').style.display = 'none';
         }
 
-        // Nhận dữ liệu GUI từ game để hiển thị và tương tác
         socket.on('window_open', (data) => {
           const container = document.getElementById('guiContainer');
           const titleElem = document.getElementById('guiTitle');
@@ -276,7 +272,6 @@ app.get('/', (req, res) => {
               slot.style.opacity = '0.2';
             }
 
-            // Click vào ô trên web sẽ gửi tín hiệu click về bot trong game
             slot.onclick = () => {
               socket.emit('click_slot', index);
             };
@@ -371,6 +366,19 @@ function sendStatsToWeb() {
 function startBot() {
   if (!hasConfigured) return;
 
+  // KIỂM TRA & GIẢI PHÓNG TOÀN BỘ BOT CŨ TRƯỚC KHI KẾT NỐI MỚI
+  if (bot) {
+    try {
+      logToWeb("🔄 Đang đóng kết nối bot cũ...");
+      bot.quit();
+    } catch (e) {}
+    bot = null;
+  }
+  if (antiAfkInterval) {
+    clearInterval(antiAfkInterval);
+    antiAfkInterval = null;
+  }
+
   logToWeb("🔄 Đang kết nối tới " + botConfig.host + " với tên " + botConfig.username + "...");
   hasLoggedIn = false;
   currentWindow = null;
@@ -425,6 +433,7 @@ function startBot() {
     logToWeb("❌ Đã đóng Menu.");
   });
 
+  // Chống văng Anti-AFK nhảy mỗi 30s
   if (antiAfkInterval) clearInterval(antiAfkInterval);
   antiAfkInterval = setInterval(() => {
     if (bot && bot.entity) {
@@ -437,12 +446,16 @@ function startBot() {
 
   bot.on('error', (err) => logToWeb("❌ Lỗi Bot: " + err.message));
   
-  bot.on('end', () => {
-    logToWeb("⚠️ Bot bị ngắt kết nối. Đang tự động kết nối lại sau 10 giây...");
+  bot.on('end', (reason) => {
+    logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason + ". Đang tự động kết nối lại sau 20 giây...");
     if (antiAfkInterval) clearInterval(antiAfkInterval);
     hasLoggedIn = false;
     io.emit('window_close');
-    setTimeout(startBot, 10000);
+    
+    // Chỉ tự kết nối lại khi vẫn đang ở trạng thái cấu hình
+    if (hasConfigured) {
+      setTimeout(startBot, 20000);
+    }
   });
 }
 
@@ -464,10 +477,12 @@ io.on('connection', (socket) => {
     startBot();
   });
 
-  // Xử lý ngắt kết nối / thoát đăng nhập để tạo acc mới
+  // Ngắt kết nối toàn bộ bot và dọn dẹp sạch sẽ
   socket.on('logout_bot', () => {
     if (bot) {
-      bot.quit();
+      try {
+        bot.quit();
+      } catch (e) {}
       bot = null;
     }
     if (antiAfkInterval) {
@@ -477,7 +492,7 @@ io.on('connection', (socket) => {
     hasConfigured = false;
     hasLoggedIn = false;
     currentWindow = null;
-    logToWeb("🚪 Đã ngắt kết nối bot theo yêu cầu tạo tài khoản mới.");
+    logToWeb("🚪 Đã thoát đăng nhập hoàn toàn. Sẵn sàng tạo tài khoản mới.");
   });
 
   socket.on('request_admin_data', () => {
