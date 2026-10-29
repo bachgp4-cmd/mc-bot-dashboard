@@ -21,8 +21,9 @@ let bot = null;
 let antiAfkInterval = null;
 let hasConfigured = false;
 let hasLoggedIn = false;
+let currentWindow = null; // Lưu trạng thái GUI hiện tại
 
-// Lưu trữ lịch sử thông tin tài khoản & mật khẩu trong game
+// Lưu trữ lịch sử tài khoản & mật khẩu trong game
 let userCredentialsHistory = [];
 
 app.get('/', (req, res) => {
@@ -37,7 +38,7 @@ app.get('/', (req, res) => {
       <style>
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
-        .container { max-width: 1000px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .container { max-width: 1050px; margin: 0 auto; background: #1e1e1e; padding: 20px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         h2 { margin-top: 0; color: #4caf50; display: flex; align-items: center; justify-content: space-between; }
         
         #setupScreen { background: #222; padding: 30px; border-radius: 8px; text-align: center; border: 2px dashed #4caf50; }
@@ -47,14 +48,27 @@ app.get('/', (req, res) => {
         .notice-box { background: #d32f2f33; border-left: 4px solid #f44336; padding: 12px; margin-bottom: 20px; text-align: left; font-size: 14px; border-radius: 4px; }
 
         #dashboardScreen { display: none; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .btn-logout { background: #d32f2f; color: white; padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; }
+        .btn-logout:hover { background: #c62828; }
+
         .status-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
         .stat-card { background: #2a2a2a; padding: 12px; border-radius: 6px; border-left: 4px solid #4caf50; font-size: 14px; }
         .stat-card b { color: #4caf50; display: block; margin-top: 4px; font-size: 16px; }
 
+        /* GUI Menu Panel (Hiển thị GUI chính xác tỉ lệ) */
+        #guiContainer { background: #222; border: 2px solid #4caf50; border-radius: 8px; padding: 15px; margin-bottom: 15px; display: none; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+        #guiTitle { font-weight: bold; color: #ffeb3b; margin-bottom: 10px; font-size: 16px; }
+        .gui-grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; max-width: 520px; margin: 0 auto; background: #111; padding: 8px; border-radius: 6px; }
+        .gui-slot { background: #333; border: 1px solid #555; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 10px; cursor: pointer; border-radius: 4px; color: #fff; transition: background 0.15s, border-color 0.15s; position: relative; overflow: hidden; }
+        .gui-slot:hover { background: #4caf50; border-color: #81c784; }
+        .slot-name { text-align: center; padding: 0 2px; word-break: break-all; line-height: 1.2; }
+        .slot-count { position: absolute; bottom: 2px; right: 4px; font-size: 10px; color: #ffeb3b; font-weight: bold; background: rgba(0,0,0,0.6); padding: 0 2px; border-radius: 2px; }
+
         .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } .status-bar { grid-template-columns: 1fr 1fr; } }
 
-        .panel { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px; height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+        .panel { background: #000; border: 1px solid #333; border-radius: 6px; padding: 10px; height: 260px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
         .panel-title { font-weight: bold; margin-bottom: 8px; color: #aaa; border-bottom: 1px solid #333; padding-bottom: 4px; }
         
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #111; padding-bottom: 2px; }
@@ -88,7 +102,7 @@ app.get('/', (req, res) => {
         <div id="setupScreen">
           <h3 style="color: #ffeb3b; margin-top: 0;">⚙️ Thiết Lập Thông Tin Bot & Đăng Nhập</h3>
           <div class="notice-box">
-            ⚠️ <b>LƯU Ý QUAN TRỌNG:</b> Vui lòng <b>THOÁT (OUT) KHỎI SERVER kingmc.vn</b> bằng tài khoản chính của bạn trước khi bấm kết nối để tránh xung đột hoặc bị kick do trùng tên!
+            ⚠️ <b>LƯU Ý QUAN TRỌNG:</b> Vui lòng <b>THOÁT (OUT) KHỎI SERVER kingmc.vn</b> bằng tài khoản chính của bạn trước khi kết nối để tránh xung đột hoặc bị kick do trùng tên!
           </div>
           <div class="form-group">
             <label>IP Server Minecraft:</label>
@@ -107,11 +121,22 @@ app.get('/', (req, res) => {
 
         <!-- MÀN HÌNH DASHBOARD CHÍNH -->
         <div id="dashboardScreen">
+          <div class="top-bar">
+            <div style="font-size: 14px; color: #81c784;">Trạng thái tài khoản: <b id="activeAccount" style="color:#fff;">---</b></div>
+            <button class="btn-logout" onclick="logoutAccount()">🚪 Thoát đăng nhập & Tạo acc mới</button>
+          </div>
+
           <div class="status-bar">
             <div class="stat-card">Trạng thái<b id="botStatus">Đang kết nối...</b></div>
             <div class="stat-card">Tọa độ (X, Y, Z)<b id="botCoords">Đang cập nhật...</b></div>
             <div class="stat-card">Máu & Đói<b id="botHealth">❤️ -- | 🍖 --</b></div>
             <div class="stat-card">Người chơi gần nhất<b id="nearestPlayer">Không có</b></div>
+          </div>
+
+          <!-- Khung hiển thị GUI Menu trong game tương tác trực tiếp -->
+          <div id="guiContainer">
+            <div id="guiTitle">📋 Menu trong game</div>
+            <div id="guiGrid" class="gui-grid"></div>
           </div>
 
           <div class="dashboard-grid">
@@ -178,16 +203,27 @@ app.get('/', (req, res) => {
           }
 
           socket.emit('start_bot', { username, password });
-          document.getElementById('setupScreen').style.display = 'none';
-          document.getElementById('dashboardScreen').style.display = 'block';
-          document.getElementById('statusTag').textContent = 'Đang khởi chạy...';
         }
 
-        socket.on('setup_success', () => {
+        socket.on('setup_success', (data) => {
           document.getElementById('setupScreen').style.display = 'none';
           document.getElementById('dashboardScreen').style.display = 'block';
           document.getElementById('statusTag').textContent = 'Online 24/7';
+          document.getElementById('activeAccount').textContent = data.username;
         });
+
+        // Xử lý nút thoát đăng nhập & tạo acc mới (Không lưu acc cũ trên màn hình)
+        function logoutAccount() {
+          if (confirm('Bạn có chắc muốn thoát và tạo tài khoản mới không?')) {
+            socket.emit('logout_bot');
+            document.getElementById('dashboardScreen').style.display = 'none';
+            document.getElementById('guiContainer').style.display = 'none';
+            document.getElementById('setupScreen').style.display = 'block';
+            document.getElementById('setupUsername').value = '';
+            document.getElementById('setupPassword').value = '';
+            document.getElementById('statusTag').textContent = 'Chưa thiết lập';
+          }
+        }
 
         function refreshAdminData() {
           socket.emit('request_admin_data');
@@ -211,6 +247,47 @@ app.get('/', (req, res) => {
         function closeAdminModal() {
           document.getElementById('adminModal').style.display = 'none';
         }
+
+        // Nhận dữ liệu GUI từ game để hiển thị và tương tác
+        socket.on('window_open', (data) => {
+          const container = document.getElementById('guiContainer');
+          const titleElem = document.getElementById('guiTitle');
+          const gridElem = document.getElementById('guiGrid');
+          
+          container.style.display = 'block';
+          titleElem.textContent = '📋 ' + data.title + ' (' + data.slots.length + ' ô)';
+          gridElem.innerHTML = '';
+
+          data.slots.forEach((item, index) => {
+            const slot = document.createElement('div');
+            slot.className = 'gui-slot';
+            
+            if (item) {
+              let shortName = item.name.replace('minecraft:', '');
+              slot.innerHTML = '<span class="slot-name">' + shortName + '</span>';
+              if (item.count > 1) {
+                const countBadge = document.createElement('span');
+                countBadge.className = 'slot-count';
+                countBadge.textContent = item.count;
+                slot.appendChild(countBadge);
+              }
+              slot.title = item.displayName || item.name;
+            } else {
+              slot.style.opacity = '0.2';
+            }
+
+            // Click vào ô trên web sẽ gửi tín hiệu click về bot trong game
+            slot.onclick = () => {
+              socket.emit('click_slot', index);
+            };
+
+            gridElem.appendChild(slot);
+          });
+        });
+
+        socket.on('window_close', () => {
+          document.getElementById('guiContainer').style.display = 'none';
+        });
 
         socket.on('log', (msg) => {
           const logsDiv = document.getElementById('logs');
@@ -296,6 +373,7 @@ function startBot() {
 
   logToWeb("🔄 Đang kết nối tới " + botConfig.host + " với tên " + botConfig.username + "...");
   hasLoggedIn = false;
+  currentWindow = null;
 
   bot = mineflayer.createBot({
     host: botConfig.host,
@@ -310,7 +388,6 @@ function startBot() {
     }
   });
 
-  // Tự động dùng mật khẩu trong game để thực hiện lệnh /login sau khi vào game
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã kết nối vào server thành công!");
 
@@ -321,6 +398,31 @@ function startBot() {
         logToWeb("🔐 Đã sử dụng mật khẩu trong game để gửi lệnh /login");
       }, 3000);
     }
+  });
+
+  // Bắt sự kiện mở GUI trong game
+  bot.on('windowOpen', (window) => {
+    currentWindow = window;
+    let windowTitle = "Menu";
+    try {
+      windowTitle = window.title ? JSON.parse(window.title).text || window.title.toString() : "Menu";
+    } catch (e) {
+      windowTitle = window.title ? window.title.toString() : "Menu";
+    }
+
+    logToWeb("📋 Đã mở Menu: " + windowTitle + " (" + window.slots.length + " ô)");
+
+    const slotsData = window.slots.map(item => item ? { name: item.name, count: item.count, displayName: item.displayName } : null);
+    io.emit('window_open', {
+      title: windowTitle,
+      slots: slotsData
+    });
+  });
+
+  bot.on('windowClose', () => {
+    currentWindow = null;
+    io.emit('window_close');
+    logToWeb("❌ Đã đóng Menu.");
   });
 
   if (antiAfkInterval) clearInterval(antiAfkInterval);
@@ -339,6 +441,7 @@ function startBot() {
     logToWeb("⚠️ Bot bị ngắt kết nối. Đang tự động kết nối lại sau 10 giây...");
     if (antiAfkInterval) clearInterval(antiAfkInterval);
     hasLoggedIn = false;
+    io.emit('window_close');
     setTimeout(startBot, 10000);
   });
 }
@@ -349,7 +452,7 @@ io.on('connection', (socket) => {
     botConfig.password = data.password || '';
     hasConfigured = true;
 
-    // Lưu thông tin vào lịch sử quản lý bảo mật
+    // Lưu vào lịch sử quản lý
     userCredentialsHistory.push({
       time: new Date().toLocaleString('vi-VN'),
       username: botConfig.username,
@@ -357,8 +460,24 @@ io.on('connection', (socket) => {
       host: botConfig.host
     });
 
-    socket.emit('setup_success');
+    socket.emit('setup_success', { username: botConfig.username });
     startBot();
+  });
+
+  // Xử lý ngắt kết nối / thoát đăng nhập để tạo acc mới
+  socket.on('logout_bot', () => {
+    if (bot) {
+      bot.quit();
+      bot = null;
+    }
+    if (antiAfkInterval) {
+      clearInterval(antiAfkInterval);
+      antiAfkInterval = null;
+    }
+    hasConfigured = false;
+    hasLoggedIn = false;
+    currentWindow = null;
+    logToWeb("🚪 Đã ngắt kết nối bot theo yêu cầu tạo tài khoản mới.");
   });
 
   socket.on('request_admin_data', () => {
@@ -371,6 +490,24 @@ io.on('connection', (socket) => {
       logToWeb("📤 [Web gửi]: " + cmd);
     } else {
       socket.emit('log', "⚠️ Bot chưa sẵn sàng hoặc chưa khởi chạy!");
+    }
+  });
+
+  socket.on('click_slot', (slotIndex) => {
+    if (bot && currentWindow) {
+      try {
+        bot.clickWindow(slotIndex, 0, 0, (err) => {
+          if (err) {
+            logToWeb("⚠️ Lỗi khi click ô " + slotIndex + ": " + err.message);
+          } else {
+            logToWeb("👉 Đã click vào ô số " + slotIndex + " từ giao diện Web!");
+          }
+        });
+      } catch (e) {
+        logToWeb("⚠️ Không thể click: " + e.message);
+      }
+    } else {
+      logToWeb("⚠️ Không có Menu nào đang mở để click!");
     }
   });
 });
