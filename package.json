@@ -1,17 +1,14 @@
 {
-  "name": "minecraft-bot-dashboard",
+  "name": "minecraft-afk-bot",
   "version": "1.0.0",
-  "description": "Minecraft Mineflayer Dashboard",
+  "description": "Minecraft AFK Bot with Web Dashboard & Automated Sequence",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=20.0.0"
-  },
   "dependencies": {
-    "express": "^4.21.2",
-    "mineflayer": "^4.39.0",
-    "socket.io": "^4.8.1"
+    "express": "^4.19.2",
+    "mineflayer": "^4.20.1",
+    "socket.io": "^4.7.5"
   }
 }
