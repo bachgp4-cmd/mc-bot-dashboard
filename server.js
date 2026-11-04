@@ -14,15 +14,16 @@ let lastSavedConfig = {
   host: 'kingmc.vn',
   username: '_caubemocoi_',
   password: 'phong123@',
-  version: '1.21.11'
+  version: '1.20.1'
 };
 
 let bot = null;
 let isRunning = false;
 let reconnectTimeout = null;
 let statsInterval = null;
+let currentWindow = null;
 
-// Giao diện Web (Nền trắng, sạch sẽ, không có GUI)
+// Giao diện Web (Nền trắng, sạch sẽ, không hiện khung GUI)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -267,27 +268,71 @@ function startBot() {
     logToWeb("✅ Bot đã vào server thành công!");
     updateStatus('Đang hoạt động (Online)', true);
 
-    // Bắt đầu cập nhật thông số vị trí/HP mỗi giây
     statsInterval = setInterval(sendStatsToWeb, 1000);
 
-    // Quy trình tự động gửi lệnh theo khoảng thời gian
+    // 1. Đợi 5s gửi lệnh /login
     setTimeout(() => {
       if (!isRunning || !bot) return;
       bot.chat('/login ' + lastSavedConfig.password);
       logToWeb("🔐 Đã gửi lệnh đăng nhập (/login)");
 
+      // 2. Đợi tiếp 5s gửi lệnh /menu
       setTimeout(() => {
         if (!isRunning || !bot) return;
         bot.chat('/menu');
         logToWeb("📋 Đã gửi lệnh /menu");
-
-        setTimeout(() => {
-          if (!isRunning || !bot) return;
-          bot.chat('/afk');
-          logToWeb("💬 Đã gửi lệnh /afk");
-        }, 3000);
       }, 5000);
     }, 5000);
+  });
+
+  // Tự động click ngầm khi Menu xuất hiện (không vẽ giao diện lên web)
+  bot.on('windowOpen', (window) => {
+    currentWindow = window;
+    let windowTitle = "Menu";
+    try {
+      windowTitle = window.title ? JSON.parse(window.title).text || window.title.toString() : "Menu";
+    } catch (e) {
+      windowTitle = window.title ? window.title.toString() : "Menu";
+    }
+
+    logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
+
+    // Menu chính: Chọn slot 24 (tính từ 0) sau 3s
+    if (window.slots.length >= 25) {
+      setTimeout(() => {
+        if (!isRunning || !bot || currentWindow !== window) return;
+        try {
+          bot.clickWindow(24, 0, 0);
+          logToWeb("👉 Đã tự động click slot thứ 24 (chọn chế độ server)");
+
+          // Đợi 4s sau khi chọn chế độ thì gửi /afk
+          setTimeout(() => {
+            if (!isRunning || !bot) return;
+            bot.chat('/afk');
+            logToWeb("💬 Đã gửi lệnh /afk");
+          }, 4000);
+        } catch (err) {
+          logToWeb("⚠️ Lỗi click slot 24: " + err.message);
+        }
+      }, 3000);
+    }
+
+    // Sub-menu AFK: Chọn slot 8 (tính từ 0) sau 1.5s
+    if (window.slots.length === 63 || window.slots.length === 54) {
+      setTimeout(() => {
+        if (!isRunning || !bot || currentWindow !== window) return;
+        try {
+          bot.clickWindow(8, 0, 0);
+          logToWeb("🎯 Đã tự động chọn slot thứ 8 trong menu AFK");
+        } catch (err) {
+          logToWeb("⚠️ Lỗi click slot 8: " + err.message);
+        }
+      }, 1500);
+    }
+  });
+
+  bot.on('windowClose', () => {
+    currentWindow = null;
   });
 
   bot.on('end', (reason) => {
