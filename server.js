@@ -9,7 +9,7 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 10000;
 
-// Cấu hình cố định theo yêu cầu
+// Cấu hình cố định
 const BOT_CONFIG = {
   host: 'kingmc.vn',
   username: '_caubemocoi_',
@@ -18,9 +18,9 @@ const BOT_CONFIG = {
 };
 
 let bot = null;
-let isRunning = false; // Trạng thái điều khiển việc bật/tắt bot thủ công
+let isRunning = false; // Cờ kiểm soát trạng thái chạy thủ công
+let reconnectTimeout = null; // Biến lưu lịch hẹn reconnect
 let currentWindow = null;
-let antiAfkInterval = null;
 
 // Web Dashboard giao diện trực quan
 app.get('/', (req, res) => {
@@ -78,19 +78,16 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="statusTag">Đang ngắt kết nối</span>
         </h2>
         
-        <!-- Nút Kết nối / Ngắt kết nối thủ công -->
         <div class="action-bar">
           <button class="btn-connect" onclick="connectBot()">🟢 Kết Nối Bot</button>
           <button class="btn-disconnect" onclick="disconnectBot()">🔴 Ngắt Kết Nối Bot</button>
         </div>
 
-        <!-- Khung hiển thị GUI tương tác trực tiếp -->
         <div id="guiContainer">
           <div id="guiTitle">📋 Menu trong game</div>
           <div id="guiGrid" class="gui-grid"></div>
         </div>
 
-        <!-- Màn hình Chat & Logs -->
         <div class="dashboard-grid">
           <div>
             <div class="panel-title">📜 Nhật ký hệ thống (Logs)</div>
@@ -102,7 +99,6 @@ app.get('/', (req, res) => {
           </div>
         </div>
 
-        <!-- Gửi lệnh / Chat -->
         <div class="control-section">
           <input type="text" id="cmdInput" placeholder="Nhập lệnh hoặc chat vào game..." onkeypress="handleKeyPress(event)" />
           <button class="btn-send" onclick="sendCommand()">Gửi lệnh</button>
@@ -138,7 +134,6 @@ app.get('/', (req, res) => {
           chatDiv.scrollTop = chatDiv.scrollHeight;
         });
 
-        // Nhận và vẽ GUI tương tác
         socket.on('window_open', (data) => {
           const container = document.getElementById('guiContainer');
           const titleElem = document.getElementById('guiTitle');
@@ -210,7 +205,13 @@ function updateStatus(text, online) {
 function startBot() {
   if (!isRunning) return;
 
-  logToWeb("🔄 Đang cố gắng kết nối tới " + BOT_CONFIG.host + "...");
+  // Dọn dẹp bot cũ nếu còn tồn tại trước khi tạo mới
+  if (bot) {
+    try { bot.quit(); } catch(e) {}
+    bot = null;
+  }
+
+  logToWeb("🔄 Đang kết nối tới " + BOT_CONFIG.host + "...");
   updateStatus('Đang kết nối...', false);
 
   bot = mineflayer.createBot({
@@ -226,7 +227,7 @@ function startBot() {
     }
   });
 
-  // Quy trình tự động theo đúng yêu cầu
+  // Quy trình tự động
   bot.on('spawn', () => {
     logToWeb("✅ Bot đã vào server thành công!");
     updateStatus('Đang hoạt động (Online)', true);
@@ -264,15 +265,15 @@ function startBot() {
       slots: slotsData
     });
 
-    // 3. Nếu là Menu chính (kiểm tra điều kiện mở menu), đợi 3s chọn slot 24 tính từ 0
+    // 3. Đợi 3s chọn slot thứ 24 tính từ 0
     if (window.slots.length >= 25) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
         try {
           bot.clickWindow(24, 0, 0);
-          logToWeb("👉 Đã tự động click slot thứ 24 (chọn server/chế độ)");
+          logToWeb("👉 Đã tự động click slot thứ 24");
 
-          // 4. Sau khi vào xong, đợi 4s gửi lệnh /afk
+          // 4. Sau đó đợi 4s gửi lệnh /afk
           setTimeout(() => {
             if (!isRunning || !bot) return;
             bot.chat('/afk');
@@ -284,7 +285,7 @@ function startBot() {
       }, 3000);
     }
 
-    // 5. Nếu là menu chọn khu AFK (thường là 63 ô hoặc menu con), tự động chọn slot thứ 8 tính từ 0
+    // 5. Nếu mở menu con AFK, chọn slot thứ 8 tính từ 0
     if (window.slots.length === 63 || window.slots.length === 54) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -304,17 +305,22 @@ function startBot() {
     logToWeb("❌ Đã đóng GUI.");
   });
 
-  // Xử lý khi bị disconnect -> Thử lại sau 5s liên tục cho đến khi vào được
+  // Xử lý khi bị văng, kick hoặc ngắt kết nối
   bot.on('end', (reason) => {
     logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason);
-    if (antiAfkInterval) clearInterval(antiAfkInterval);
     io.emit('window_close');
     currentWindow = null;
-    updateStatus('Mất kết nối, đang thử lại...', false);
+    updateStatus('Mất kết nối, chờ reconnect...', false);
 
+    // Chỉ tự động reconnect nếu người dùng KHÔNG bấm ngắt kết nối thủ công
     if (isRunning) {
-      logToWeb("⏳ Thử kết nối lại sau 5 giây...");
-      setTimeout(startBot, 5000);
+      logToWeb("⏳ Sẽ tự động kết nối lại (reconnect) sau đúng 10 giây...");
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      reconnectTimeout = setTimeout(() => {
+        if (isRunning) {
+          startBot();
+        }
+      }, 10000);
     }
   });
 
@@ -333,20 +339,20 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect_bot', () => {
-    isRunning = false;
+    isRunning = false; // Đặt cờ false để chặn tuyệt đối việc tự động reconnect
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
     if (bot) {
       try {
         bot.quit();
       } catch (e) {}
       bot = null;
     }
-    if (antiAfkInterval) {
-      clearInterval(antiAfkInterval);
-      antiAfkInterval = null;
-    }
     io.emit('window_close');
-    updateStatus('Đã ngắt kết nối', false);
-    logToWeb("🛑 Đã ngắt kết nối bot theo yêu cầu thủ công.");
+    updateStatus('Đã ngắt kết nối thủ công', false);
+    logToWeb("🛑 Bạn đã ngắt kết nối bot thủ công. Bot sẽ không tự động kết nối lại.");
   });
 
   socket.on('send_command', (cmd) => {
