@@ -21,7 +21,9 @@ let isRunning = false;
 let reconnectTimeout = null;
 let statsInterval = null;
 let currentWindow = null;
-let hasLoggedIn = false; // Cờ đánh dấu đã login và chạy chuỗi menu (tránh lặp)
+let hasLoggedIn = false;
+let currentStatusText = 'Đang ngắt kết nối';
+let isOnline = false;
 
 app.get('/', (req, res) => {
   res.send(`
@@ -131,6 +133,7 @@ app.get('/', (req, res) => {
 
         window.addEventListener('DOMContentLoaded', () => {
           socket.emit('get_config');
+          socket.emit('request_current_status');
         });
 
         socket.on('load_config', (config) => {
@@ -206,6 +209,8 @@ function logToWeb(msg) {
 }
 
 function updateStatus(text, online) {
+  currentStatusText = text;
+  isOnline = online;
   io.emit('status_update', { text, online });
 }
 
@@ -241,7 +246,7 @@ function startBot() {
     bot = null;
   }
   if (statsInterval) clearInterval(statsInterval);
-  hasLoggedIn = false; // Reset cờ mỗi khi tạo kết nối mới
+  hasLoggedIn = false;
 
   logToWeb("🔄 Đang kết nối tới " + lastSavedConfig.host + " với tên " + lastSavedConfig.username + "...");
   updateStatus('Đang kết nối...', false);
@@ -260,12 +265,12 @@ function startBot() {
   });
 
   bot.on('spawn', () => {
-    logToWeb("✅ Bot đã vào server thành công!");
+    logToWeb("✅ Bot đã kết nối vào game thành công!");
     updateStatus('Đang hoạt động (Online)', true);
 
+    if (statsInterval) clearInterval(statsInterval);
     statsInterval = setInterval(sendStatsToWeb, 1000);
 
-    // CHỈ THỰC HIỆN CHUỖI GỬI LỆNH 1 LẦN DUY NHẤT SAU KHI VÀO GAME
     if (!hasLoggedIn) {
       hasLoggedIn = true;
 
@@ -294,7 +299,6 @@ function startBot() {
 
     logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
 
-    // Menu chính: Chọn slot 24 sau 3s
     if (window.slots.length >= 25) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -313,7 +317,6 @@ function startBot() {
       }, 3000);
     }
 
-    // Sub-menu AFK: Chọn slot 8 sau 1.5s
     if (window.slots.length === 63 || window.slots.length === 54) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -349,14 +352,9 @@ function startBot() {
 
   bot.on('error', (err) => {
     logToWeb("❌ Lỗi Bot: " + err.message);
+    updateStatus('Lỗi kết nối', false);
   });
 }
-
-setTimeout(() => {
-  if (isRunning) {
-    startBot();
-  }
-}, 1000);
 
 io.on('connection', (socket) => {
   socket.on('get_config', () => {
@@ -364,6 +362,10 @@ io.on('connection', (socket) => {
       username: lastSavedConfig.username,
       password: lastSavedConfig.password
     });
+  });
+
+  socket.on('request_current_status', () => {
+    socket.emit('status_update', { text: currentStatusText, online: isOnline });
   });
 
   socket.on('connect_bot', (data) => {
