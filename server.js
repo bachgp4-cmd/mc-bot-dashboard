@@ -18,8 +18,8 @@ const BOT_CONFIG = {
 };
 
 let bot = null;
-let isRunning = false; // Cờ kiểm soát trạng thái chạy thủ công
-let reconnectTimeout = null; // Biến lưu lịch hẹn reconnect
+let isRunning = true; // Đặt mặc định là true để bot tự chạy ngay khi khởi động server / UptimeRobot gọi
+let reconnectTimeout = null;
 let currentWindow = null;
 
 // Web Dashboard giao diện trực quan
@@ -68,19 +68,19 @@ app.get('/', (req, res) => {
         input[type="text"] { flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #444; background: #1a1a1a; color: #fff; font-size: 15px; outline: none; }
         .btn-send { background: #2196f3; }
         .btn-send:hover { background: #1976d2; }
-        .status-tag { font-size: 13px; background: #d32f2f; padding: 4px 10px; border-radius: 12px; color: #fff; }
+        .status-tag { font-size: 13px; background: #2e7d32; padding: 4px 10px; border-radius: 12px; color: #fff; }
       </style>
     </head>
     <body>
       <div class="container">
         <h2>
           <span>🤖 Minecraft Bot: _caubemocoi_ (@ kingmc.vn)</span>
-          <span class="status-tag" id="statusTag">Đang ngắt kết nối</span>
+          <span class="status-tag" id="statusTag">Đang hoạt động</span>
         </h2>
         
         <div class="action-bar">
-          <button class="btn-connect" onclick="connectBot()">🟢 Kết Nối Bot</button>
-          <button class="btn-disconnect" onclick="disconnectBot()">🔴 Ngắt Kết Nối Bot</button>
+          <button class="btn-connect" onclick="connectBot()">🟢 Kết Nối Lại Bot</button>
+          <button class="btn-disconnect" onclick="disconnectBot()">🔴 Ngắt Kết Nối Thủ Công</button>
         </div>
 
         <div id="guiContainer">
@@ -205,7 +205,6 @@ function updateStatus(text, online) {
 function startBot() {
   if (!isRunning) return;
 
-  // Dọn dẹp bot cũ nếu còn tồn tại trước khi tạo mới
   if (bot) {
     try { bot.quit(); } catch(e) {}
     bot = null;
@@ -232,13 +231,11 @@ function startBot() {
     logToWeb("✅ Bot đã vào server thành công!");
     updateStatus('Đang hoạt động (Online)', true);
 
-    // 1. Đợi 5s gửi mật khẩu đăng nhập
     setTimeout(() => {
       if (!isRunning || !bot) return;
       bot.chat('/login ' + BOT_CONFIG.password);
       logToWeb("🔐 Đã gửi lệnh đăng nhập (/login)");
 
-      // 2. Đợi tiếp 5s gửi lệnh /menu
       setTimeout(() => {
         if (!isRunning || !bot) return;
         bot.chat('/menu');
@@ -247,7 +244,6 @@ function startBot() {
     }, 5000);
   });
 
-  // Bắt sự kiện mở GUI / Menu
   bot.on('windowOpen', (window) => {
     currentWindow = window;
     let windowTitle = "Menu";
@@ -265,7 +261,6 @@ function startBot() {
       slots: slotsData
     });
 
-    // 3. Đợi 3s chọn slot thứ 24 tính từ 0
     if (window.slots.length >= 25) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -273,7 +268,6 @@ function startBot() {
           bot.clickWindow(24, 0, 0);
           logToWeb("👉 Đã tự động click slot thứ 24");
 
-          // 4. Sau đó đợi 4s gửi lệnh /afk
           setTimeout(() => {
             if (!isRunning || !bot) return;
             bot.chat('/afk');
@@ -285,7 +279,6 @@ function startBot() {
       }, 3000);
     }
 
-    // 5. Nếu mở menu con AFK, chọn slot thứ 8 tính từ 0
     if (window.slots.length === 63 || window.slots.length === 54) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -305,14 +298,12 @@ function startBot() {
     logToWeb("❌ Đã đóng GUI.");
   });
 
-  // Xử lý khi bị văng, kick hoặc ngắt kết nối
   bot.on('end', (reason) => {
     logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason);
     io.emit('window_close');
     currentWindow = null;
     updateStatus('Mất kết nối, chờ reconnect...', false);
 
-    // Chỉ tự động reconnect nếu người dùng KHÔNG bấm ngắt kết nối thủ công
     if (isRunning) {
       logToWeb("⏳ Sẽ tự động kết nối lại (reconnect) sau đúng 10 giây...");
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
@@ -329,7 +320,13 @@ function startBot() {
   });
 }
 
-// Lắng nghe sự kiện từ Web Socket
+// Tự động khởi chạy bot ngay khi server vừa bật lên hoặc UptimeRobot đánh thức
+setTimeout(() => {
+  if (isRunning) {
+    startBot();
+  }
+}, 1000);
+
 io.on('connection', (socket) => {
   socket.on('connect_bot', () => {
     if (!isRunning) {
@@ -339,15 +336,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect_bot', () => {
-    isRunning = false; // Đặt cờ false để chặn tuyệt đối việc tự động reconnect
+    isRunning = false;
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
       reconnectTimeout = null;
     }
     if (bot) {
-      try {
-        bot.quit();
-      } catch (e) {}
+      try { bot.quit(); } catch (e) {}
       bot = null;
     }
     io.emit('window_close');
