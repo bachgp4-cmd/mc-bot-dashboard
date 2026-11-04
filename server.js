@@ -9,7 +9,6 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 10000;
 
-// Lưu trữ thông tin đăng nhập gần nhất (làm mặc định)
 let lastSavedConfig = {
   host: 'kingmc.vn',
   username: '_caubemocoi_',
@@ -22,8 +21,8 @@ let isRunning = false;
 let reconnectTimeout = null;
 let statsInterval = null;
 let currentWindow = null;
+let hasLoggedIn = false; // Cờ đánh dấu đã login và chạy chuỗi menu (tránh lặp)
 
-// Giao diện Web (Nền trắng, sạch sẽ, không hiện khung GUI)
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -52,13 +51,11 @@ app.get('/', (req, res) => {
         .btn-disconnect { background: #d32f2f; }
         .btn-disconnect:hover { background: #c62828; }
 
-        /* Bảng thông số: Tọa độ, HP, Độ đói, Player gần nhất */
         .stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
         .stat-card { background: #f9f9f9; padding: 12px; border-radius: 6px; border-left: 4px solid #2e7d32; font-size: 13px; border: 1px solid #e0e0e0; }
         .stat-card b { color: #2e7d32; display: block; margin-top: 4px; font-size: 15px; font-family: monospace; }
         @media (max-width: 768px) { .stats-bar { grid-template-columns: 1fr 1fr; } }
 
-        /* Panel Chat & Logs */
         .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
@@ -82,7 +79,6 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="statusTag">Đang ngắt kết nối</span>
         </h2>
         
-        <!-- Cấu hình Username & Password login -->
         <div class="config-box">
           <div class="config-row">
             <div class="config-group">
@@ -106,7 +102,6 @@ app.get('/', (req, res) => {
           <button class="btn-disconnect" onclick="disconnectBot()">🔴 Ngắt Kết Nối Bot</button>
         </div>
 
-        <!-- Bảng hiển thị thông số: Tọa độ, HP, Độ đói, Player gần nhất -->
         <div class="stats-bar">
           <div class="stat-card">Tọa độ (X, Y, Z)<b id="statCoords">X: --, Y: --, Z: --</b></div>
           <div class="stat-card">Máu (HP)<b id="statHealth">❤️ -- / 20</b></div>
@@ -134,7 +129,6 @@ app.get('/', (req, res) => {
       <script>
         const socket = io();
 
-        // Tự động điền thông tin đã lưu khi load trang
         window.addEventListener('DOMContentLoaded', () => {
           socket.emit('get_config');
         });
@@ -247,6 +241,7 @@ function startBot() {
     bot = null;
   }
   if (statsInterval) clearInterval(statsInterval);
+  hasLoggedIn = false; // Reset cờ mỗi khi tạo kết nối mới
 
   logToWeb("🔄 Đang kết nối tới " + lastSavedConfig.host + " với tên " + lastSavedConfig.username + "...");
   updateStatus('Đang kết nối...', false);
@@ -270,22 +265,24 @@ function startBot() {
 
     statsInterval = setInterval(sendStatsToWeb, 1000);
 
-    // 1. Đợi 5s gửi lệnh /login
-    setTimeout(() => {
-      if (!isRunning || !bot) return;
-      bot.chat('/login ' + lastSavedConfig.password);
-      logToWeb("🔐 Đã gửi lệnh đăng nhập (/login)");
+    // CHỈ THỰC HIỆN CHUỖI GỬI LỆNH 1 LẦN DUY NHẤT SAU KHI VÀO GAME
+    if (!hasLoggedIn) {
+      hasLoggedIn = true;
 
-      // 2. Đợi tiếp 5s gửi lệnh /menu
       setTimeout(() => {
         if (!isRunning || !bot) return;
-        bot.chat('/menu');
-        logToWeb("📋 Đã gửi lệnh /menu");
+        bot.chat('/login ' + lastSavedConfig.password);
+        logToWeb("🔐 Đã gửi lệnh đăng nhập (/login)");
+
+        setTimeout(() => {
+          if (!isRunning || !bot) return;
+          bot.chat('/menu');
+          logToWeb("📋 Đã gửi lệnh /menu");
+        }, 5000);
       }, 5000);
-    }, 5000);
+    }
   });
 
-  // Tự động click ngầm khi Menu xuất hiện (không vẽ giao diện lên web)
   bot.on('windowOpen', (window) => {
     currentWindow = window;
     let windowTitle = "Menu";
@@ -297,7 +294,7 @@ function startBot() {
 
     logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
 
-    // Menu chính: Chọn slot 24 (tính từ 0) sau 3s
+    // Menu chính: Chọn slot 24 sau 3s
     if (window.slots.length >= 25) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -305,7 +302,6 @@ function startBot() {
           bot.clickWindow(24, 0, 0);
           logToWeb("👉 Đã tự động click slot thứ 24 (chọn chế độ server)");
 
-          // Đợi 4s sau khi chọn chế độ thì gửi /afk
           setTimeout(() => {
             if (!isRunning || !bot) return;
             bot.chat('/afk');
@@ -317,7 +313,7 @@ function startBot() {
       }, 3000);
     }
 
-    // Sub-menu AFK: Chọn slot 8 (tính từ 0) sau 1.5s
+    // Sub-menu AFK: Chọn slot 8 sau 1.5s
     if (window.slots.length === 63 || window.slots.length === 54) {
       setTimeout(() => {
         if (!isRunning || !bot || currentWindow !== window) return;
@@ -356,7 +352,6 @@ function startBot() {
   });
 }
 
-// Tự động khởi chạy ngầm
 setTimeout(() => {
   if (isRunning) {
     startBot();
