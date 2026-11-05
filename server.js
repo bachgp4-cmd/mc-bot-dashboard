@@ -25,6 +25,14 @@ let hasLoggedIn = false;
 let currentStatusText = 'Đang ngắt kết nối';
 let isOnline = false;
 
+// Mảng quản lý tất cả các timer hẹn giờ gửi lệnh (để hủy sạch khi disconnect)
+let activeSequenceTimeouts = [];
+
+function clearAllSequenceTimeouts() {
+  activeSequenceTimeouts.forEach(t => clearTimeout(t));
+  activeSequenceTimeouts = [];
+}
+
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -241,6 +249,8 @@ function sendStatsToWeb() {
 function startBot() {
   if (!isRunning) return;
 
+  // Dọn dẹp kết nối và các hẹn giờ cũ
+  clearAllSequenceTimeouts();
   if (bot) {
     try { bot.quit(); } catch(e) {}
     bot = null;
@@ -271,20 +281,36 @@ function startBot() {
     if (statsInterval) clearInterval(statsInterval);
     statsInterval = setInterval(sendStatsToWeb, 1000);
 
+    // Thực hiện gửi /login 2 lần, ngắt ngay nếu văng bot trong lúc chờ
     if (!hasLoggedIn) {
       hasLoggedIn = true;
 
-      setTimeout(() => {
-        if (!isRunning || !bot) return;
+      // Bước 1: Chờ 5s gửi /login lần 1
+      const t1 = setTimeout(() => {
+        if (!isRunning || !bot || !isOnline) return;
         bot.chat('/login ' + lastSavedConfig.password);
-        logToWeb("🔐 Đã gửi lệnh đăng nhập (/login)");
+        logToWeb("🔐 Đã gửi lệnh đăng nhập (/login) lần 1");
 
-        setTimeout(() => {
-          if (!isRunning || !bot) return;
-          bot.chat('/menu');
-          logToWeb("📋 Đã gửi lệnh /menu");
-        }, 5000);
+        // Bước 2: Chờ 3s gửi /login lần 2
+        const t2 = setTimeout(() => {
+          if (!isRunning || !bot || !isOnline) return;
+          bot.chat('/login ' + lastSavedConfig.password);
+          logToWeb("🔐 Đã gửi lệnh đăng nhập (/login) lần 2");
+
+          // Bước 3: Chờ 4s mới gửi /menu
+          const t3 = setTimeout(() => {
+            if (!isRunning || !bot || !isOnline) return;
+            bot.chat('/menu');
+            logToWeb("📋 Đã gửi lệnh /menu");
+          }, 4000);
+
+          activeSequenceTimeouts.push(t3);
+        }, 3000);
+
+        activeSequenceTimeouts.push(t2);
       }, 5000);
+
+      activeSequenceTimeouts.push(t1);
     }
   });
 
@@ -299,27 +325,33 @@ function startBot() {
 
     logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
 
+    // Slot 24 cho Menu chính
     if (window.slots.length >= 25) {
-      setTimeout(() => {
-        if (!isRunning || !bot || currentWindow !== window) return;
+      const t4 = setTimeout(() => {
+        if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
         try {
           bot.clickWindow(24, 0, 0);
           logToWeb("👉 Đã tự động click slot thứ 24 (chọn chế độ server)");
 
-          setTimeout(() => {
-            if (!isRunning || !bot) return;
+          const t5 = setTimeout(() => {
+            if (!isRunning || !bot || !isOnline) return;
             bot.chat('/afk');
             logToWeb("💬 Đã gửi lệnh /afk");
           }, 4000);
+
+          activeSequenceTimeouts.push(t5);
         } catch (err) {
           logToWeb("⚠️ Lỗi click slot 24: " + err.message);
         }
       }, 3000);
+
+      activeSequenceTimeouts.push(t4);
     }
 
+    // Slot 8 cho Menu AFK
     if (window.slots.length === 63 || window.slots.length === 54) {
-      setTimeout(() => {
-        if (!isRunning || !bot || currentWindow !== window) return;
+      const t6 = setTimeout(() => {
+        if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
         try {
           bot.clickWindow(8, 0, 0);
           logToWeb("🎯 Đã tự động chọn slot thứ 8 trong menu AFK");
@@ -327,6 +359,8 @@ function startBot() {
           logToWeb("⚠️ Lỗi click slot 8: " + err.message);
         }
       }, 1500);
+
+      activeSequenceTimeouts.push(t6);
     }
   });
 
@@ -334,9 +368,14 @@ function startBot() {
     currentWindow = null;
   });
 
+  // Khi bị DISCONNECT: Hủy sạch timer gửi lệnh, lập tức dừng chuỗi gửi login/menu
   bot.on('end', (reason) => {
     logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason);
+
+    // DỪNG TOÀN BỘ CHUỖI GỬI LỆNH LOGIN / MENU HIỆN TẠI
+    clearAllSequenceTimeouts();
     if (statsInterval) clearInterval(statsInterval);
+    hasLoggedIn = false;
     updateStatus('Mất kết nối, chờ reconnect...', false);
 
     if (isRunning) {
@@ -352,6 +391,7 @@ function startBot() {
 
   bot.on('error', (err) => {
     logToWeb("❌ Lỗi Bot: " + err.message);
+    clearAllSequenceTimeouts();
     updateStatus('Lỗi kết nối', false);
   });
 }
@@ -382,6 +422,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect_bot', () => {
     isRunning = false;
+    clearAllSequenceTimeouts();
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
       reconnectTimeout = null;
@@ -396,7 +437,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_command', (cmd) => {
-    if (bot && isRunning) {
+    if (bot && isRunning && isOnline) {
       bot.chat(cmd);
       logToWeb("📤 [Web gửi]: " + cmd);
     } else {
