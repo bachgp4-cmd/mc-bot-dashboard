@@ -25,6 +25,9 @@ let hasLoggedIn = false;
 let currentStatusText = 'Đang ngắt kết nối';
 let isOnline = false;
 
+// Cờ đánh dấu để chỉ click slot 24 đúng sau khi vừa gửi lệnh /menu
+let waitingForMenuClick = false;
+
 // Mảng quản lý tất cả các timer hẹn giờ gửi lệnh (để hủy sạch khi disconnect)
 let activeSequenceTimeouts = [];
 
@@ -249,7 +252,6 @@ function sendStatsToWeb() {
 function startBot() {
   if (!isRunning) return;
 
-  // Dọn dẹp kết nối và các hẹn giờ cũ
   clearAllSequenceTimeouts();
   if (bot) {
     try { bot.quit(); } catch(e) {}
@@ -257,6 +259,7 @@ function startBot() {
   }
   if (statsInterval) clearInterval(statsInterval);
   hasLoggedIn = false;
+  waitingForMenuClick = false;
 
   logToWeb("🔄 Đang kết nối tới " + lastSavedConfig.host + " với tên " + lastSavedConfig.username + "...");
   updateStatus('Đang kết nối...', false);
@@ -281,7 +284,6 @@ function startBot() {
     if (statsInterval) clearInterval(statsInterval);
     statsInterval = setInterval(sendStatsToWeb, 1000);
 
-    // Thực hiện gửi /login 2 lần, ngắt ngay nếu văng bot trong lúc chờ
     if (!hasLoggedIn) {
       hasLoggedIn = true;
 
@@ -300,6 +302,7 @@ function startBot() {
           // Bước 3: Chờ 4s mới gửi /menu
           const t3 = setTimeout(() => {
             if (!isRunning || !bot || !isOnline) return;
+            waitingForMenuClick = true; // Bật cờ cho phép click slot 24 sau lệnh /menu
             bot.chat('/menu');
             logToWeb("📋 Đã gửi lệnh /menu");
           }, 4000);
@@ -325,14 +328,17 @@ function startBot() {
 
     logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
 
-    // Slot 24 cho Menu chính
-    if (window.slots.length >= 25) {
+    // CHỈ CLICK SLOT 24 NẾU MENU NÀY MỞ RA DO LỆNH /MENU
+    if (waitingForMenuClick && window.slots.length >= 25) {
+      waitingForMenuClick = false; // Tắt cờ sau khi xử lý
+
       const t4 = setTimeout(() => {
         if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
         try {
           bot.clickWindow(24, 0, 0);
-          logToWeb("👉 Đã tự động click slot thứ 24 (chọn chế độ server)");
+          logToWeb("👉 Đã tự động click slot thứ 24 theo lệnh /menu");
 
+          // Đợi 4s sau khi chọn slot 24 thì gửi lệnh /afk
           const t5 = setTimeout(() => {
             if (!isRunning || !bot || !isOnline) return;
             bot.chat('/afk');
@@ -346,17 +352,16 @@ function startBot() {
       }, 3000);
 
       activeSequenceTimeouts.push(t4);
-    }
-
-    // Slot 8 cho Menu AFK
-    if (window.slots.length === 63 || window.slots.length === 54) {
+    } else if (window.slots.length === 63 || window.slots.length === 54 || window.slots.length >= 10) {
+      // MENU KHI GỬI LỆNH /AFK: Chọn ngẫu nhiên 1 slot từ 0 đến 9
       const t6 = setTimeout(() => {
         if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
         try {
-          bot.clickWindow(8, 0, 0);
-          logToWeb("🎯 Đã tự động chọn slot thứ 8 trong menu AFK");
+          const randomSlot = Math.floor(Math.random() * 10); // Ngẫu nhiên 0 đến 9
+          bot.clickWindow(randomSlot, 0, 0);
+          logToWeb("🎲 Đã chọn ngẫu nhiên slot thứ " + randomSlot + " trong menu AFK");
         } catch (err) {
-          logToWeb("⚠️ Lỗi click slot 8: " + err.message);
+          logToWeb("⚠️ Lỗi click slot ngẫu nhiên: " + err.message);
         }
       }, 1500);
 
@@ -368,14 +373,13 @@ function startBot() {
     currentWindow = null;
   });
 
-  // Khi bị DISCONNECT: Hủy sạch timer gửi lệnh, lập tức dừng chuỗi gửi login/menu
   bot.on('end', (reason) => {
     logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason);
 
-    // DỪNG TOÀN BỘ CHUỖI GỬI LỆNH LOGIN / MENU HIỆN TẠI
     clearAllSequenceTimeouts();
     if (statsInterval) clearInterval(statsInterval);
     hasLoggedIn = false;
+    waitingForMenuClick = false;
     updateStatus('Mất kết nối, chờ reconnect...', false);
 
     if (isRunning) {
@@ -438,6 +442,10 @@ io.on('connection', (socket) => {
 
   socket.on('send_command', (cmd) => {
     if (bot && isRunning && isOnline) {
+      // Nếu người dùng chủ động gửi lệnh /menu từ ô chat trên Web, cũng sẽ kích hoạt cờ waitingForMenuClick
+      if (cmd.trim().toLowerCase() === '/menu') {
+        waitingForMenuClick = true;
+      }
       bot.chat(cmd);
       logToWeb("📤 [Web gửi]: " + cmd);
     } else {
