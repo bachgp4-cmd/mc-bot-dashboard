@@ -8,32 +8,21 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 10000;
+const MAX_BOTS = 5;
 
-let lastSavedConfig = {
-  host: 'kingmc.vn',
-  username: '_caubemocoi_',
-  password: 'phong123@',
-  version: '1.20.1'
-};
+// Lưu trữ cấu hình 5 bot (Mặc định khởi tạo 1 bot đầu tiên)
+let botsConfig = [
+  { id: 1, username: '_caubemocoi_', password: 'phong123@' }
+];
 
-let bot = null;
-let isRunning = false;
-let reconnectTimeout = null;
-let statsInterval = null;
-let currentWindow = null;
-let hasLoggedIn = false;
-let currentStatusText = 'Đang ngắt kết nối';
-let isOnline = false;
+// Đối tượng quản lý các instance bot và trạng thái riêng biệt
+const activeBots = {};
 
-// Cờ đánh dấu để chỉ click slot 24 đúng sau khi vừa gửi lệnh /menu
-let waitingForMenuClick = false;
-
-// Mảng quản lý tất cả các timer hẹn giờ gửi lệnh (để hủy sạch khi disconnect)
-let activeSequenceTimeouts = [];
-
-function clearAllSequenceTimeouts() {
-  activeSequenceTimeouts.forEach(t => clearTimeout(t));
-  activeSequenceTimeouts = [];
+function clearBotTimeouts(botId) {
+  if (activeBots[botId] && activeBots[botId].timeouts) {
+    activeBots[botId].timeouts.forEach(t => clearTimeout(t));
+    activeBots[botId].timeouts = [];
+  }
 }
 
 app.get('/', (req, res) => {
@@ -43,78 +32,78 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Bot AFK Dashboard - _caubemocoi_</title>
+      <title>Multi-Bot AFK Dashboard (Max 5 Bots)</title>
       <script src="/socket.io/socket.io.js"></script>
       <style>
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f5f5; color: #333; margin: 0; padding: 20px; }
-        .container { max-width: 1050px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border: 1px solid #ddd; }
+        .container { max-width: 1100px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border: 1px solid #ddd; }
         h2 { margin-top: 0; color: #2e7d32; display: flex; align-items: center; justify-content: space-between; }
         
+        /* Form thêm/quản lý danh sách 5 Bot */
         .config-box { background: #fafafa; border: 1px solid #ccc; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
-        .config-row { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
-        .config-group { flex: 1; min-width: 200px; }
-        .config-group label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 13px; color: #555; }
-        .config-group input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #333; font-size: 14px; outline: none; }
+        .bot-config-row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
+        .bot-config-row input { flex: 1; padding: 8px 12px; border-radius: 4px; border: 1px solid #ccc; outline: none; }
+        .btn-remove-config { background: #d32f2f; color: #fff; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; }
 
-        .action-bar { display: flex; gap: 10px; margin-bottom: 15px; }
-        button { padding: 12px 20px; border: none; border-radius: 6px; color: white; cursor: pointer; font-weight: bold; font-size: 14px; transition: background 0.2s; }
-        .btn-connect { background: #4caf50; }
-        .btn-connect:hover { background: #45a049; }
-        .btn-disconnect { background: #d32f2f; }
-        .btn-disconnect:hover { background: #c62828; }
+        .action-bar { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+        button { padding: 10px 18px; border: none; border-radius: 6px; color: white; cursor: pointer; font-weight: bold; font-size: 14px; transition: background 0.2s; }
+        .btn-connect-all { background: #2e7d32; }
+        .btn-disconnect-all { background: #c62828; }
+        .btn-add-bot { background: #0288d1; }
 
+        /* Navigation Tabs cho từng Bot */
+        .bot-tabs { display: flex; gap: 5px; border-bottom: 2px solid #ddd; margin-bottom: 15px; overflow-x: auto; }
+        .tab-btn { background: #e0e0e0; color: #333; padding: 10px 16px; border-radius: 6px 6px 0 0; cursor: pointer; border: none; font-weight: bold; }
+        .tab-btn.active { background: #2e7d32; color: #fff; }
+
+        /* Bảng thông số: Tọa độ, HP, Độ đói, Player gần nhất */
         .stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
         .stat-card { background: #f9f9f9; padding: 12px; border-radius: 6px; border-left: 4px solid #2e7d32; font-size: 13px; border: 1px solid #e0e0e0; }
         .stat-card b { color: #2e7d32; display: block; margin-top: 4px; font-size: 15px; font-family: monospace; }
         @media (max-width: 768px) { .stats-bar { grid-template-columns: 1fr 1fr; } }
 
+        /* Panel Chat & Logs */
         .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
-        .panel { background: #fafafa; border: 1px solid #ccc; border-radius: 6px; padding: 10px; height: 320px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; color: #333; }
+        .panel { background: #fafafa; border: 1px solid #ccc; border-radius: 6px; padding: 10px; height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; color: #333; }
         .panel-title { font-weight: bold; margin-bottom: 8px; color: #555; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
         
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #eee; padding-bottom: 2px; color: #444; }
         .chat-entry { color: #00796b; margin-bottom: 4px; border-bottom: 1px solid #eee; padding-bottom: 2px; font-weight: 500; }
 
         .control-section { margin-top: 15px; background: #fafafa; padding: 15px; border-radius: 6px; display: flex; gap: 10px; border: 1px solid #ccc; }
-        input[type="text"], input[type="password"] { flex: 1; padding: 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #333; font-size: 14px; outline: none; }
+        input[type="text"] { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #333; font-size: 14px; outline: none; }
         .btn-send { background: #0288d1; }
-        .btn-send:hover { background: #0277bd; }
-        .status-tag { font-size: 13px; background: #d32f2f; padding: 4px 10px; border-radius: 12px; color: #fff; }
+        .status-tag { font-size: 13px; background: #757575; padding: 4px 10px; border-radius: 12px; color: #fff; }
       </style>
     </head>
     <body>
       <div class="container">
         <h2>
-          <span>🤖 Minecraft Bot Dashboard</span>
-          <span class="status-tag" id="statusTag">Đang ngắt kết nối</span>
+          <span>🤖 Quản Lý Minecraft Bot (Tối đa 5 Bot)</span>
+          <span class="status-tag" id="globalStatus">Sẵn sàng</span>
         </h2>
         
+        <!-- Cấu hình danh sách 5 tài khoản -->
         <div class="config-box">
-          <div class="config-row">
-            <div class="config-group">
-              <label>Tên Ingame (Username):</label>
-              <input type="text" id="inputUsername" placeholder="_caubemocoi_" />
-            </div>
-            <div class="config-group">
-              <label>Mật khẩu Trong Game (/login):</label>
-              <input type="password" id="inputPassword" placeholder="phong123@" />
-            </div>
-          </div>
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 5px;">
-            <label style="font-size: 13px; cursor: pointer; color: #333;">
-              <input type="checkbox" id="saveCredCheckbox" checked /> Lưu thông tin đăng nhập cho các lần tiếp theo
-            </label>
+          <div id="botConfigList"></div>
+          <div style="margin-top: 10px;">
+            <button class="btn-add-bot" onclick="addBotConfigRow()">➕ Thêm Tài Khoản Bot</button>
+            <button style="background: #ff9800;" onclick="saveConfigList()">💾 Lưu Cấu Hình Bot</button>
           </div>
         </div>
 
         <div class="action-bar">
-          <button class="btn-connect" onclick="connectBot()">🟢 Kết Nối Bot</button>
-          <button class="btn-disconnect" onclick="disconnectBot()">🔴 Ngắt Kết Nối Bot</button>
+          <button class="btn-connect-all" onclick="connectAllBots()">🚀 Kết Nối Tất Cả Bot</button>
+          <button class="btn-disconnect-all" onclick="disconnectAllBots()">🛑 Ngắt Kết Nối Tất Cả</button>
         </div>
 
+        <!-- Navigation Tabs chọn Bot để xem chi tiết -->
+        <div class="bot-tabs" id="botTabs"></div>
+
+        <!-- Bảng hiển thị thông số Bot đang chọn -->
         <div class="stats-bar">
           <div class="stat-card">Tọa độ (X, Y, Z)<b id="statCoords">X: --, Y: --, Z: --</b></div>
           <div class="stat-card">Máu (HP)<b id="statHealth">❤️ -- / 20</b></div>
@@ -124,7 +113,7 @@ app.get('/', (req, res) => {
 
         <div class="dashboard-grid">
           <div>
-            <div class="panel-title">📜 Nhật ký hệ thống (Logs)</div>
+            <div class="panel-title">📜 Nhật ký Bot đang chọn (Logs)</div>
             <div id="logs" class="panel"></div>
           </div>
           <div>
@@ -134,71 +123,133 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="control-section">
-          <input type="text" id="cmdInput" placeholder="Nhập lệnh hoặc chat vào game..." onkeypress="handleKeyPress(event)" />
+          <input type="text" id="cmdInput" placeholder="Nhập lệnh hoặc chat thay mặt Bot đang chọn..." onkeypress="handleKeyPress(event)" />
           <button class="btn-send" onclick="sendCommand()">Gửi lệnh</button>
         </div>
       </div>
 
       <script>
         const socket = io();
+        let currentSelectedBotId = 1;
+        let localConfigs = [];
 
         window.addEventListener('DOMContentLoaded', () => {
-          socket.emit('get_config');
-          socket.emit('request_current_status');
+          socket.emit('get_initial_data');
         });
 
-        socket.on('load_config', (config) => {
-          if (config.username) document.getElementById('inputUsername').value = config.username;
-          if (config.password) document.getElementById('inputPassword').value = config.password;
+        socket.on('init_configs', (configs) => {
+          localConfigs = configs;
+          renderConfigRows();
+          renderTabs();
         });
 
-        function connectBot() {
-          const username = document.getElementById('inputUsername').value.trim();
-          const password = document.getElementById('inputPassword').value.trim();
-          const saveCred = document.getElementById('saveCredCheckbox').checked;
+        function renderConfigRows() {
+          const listDiv = document.getElementById('botConfigList');
+          listDiv.innerHTML = '';
+          localConfigs.forEach((cfg, index) => {
+            const row = document.createElement('div');
+            row.className = 'bot-config-row';
+            row.innerHTML = \`
+              <span style="font-weight:bold; min-width:60px;">Bot \${index + 1}:</span>
+              <input type="text" placeholder="Username" value="\${cfg.username}" id="user_\${cfg.id}" />
+              <input type="password" placeholder="Password /login" value="\${cfg.password}" id="pass_\${cfg.id}" />
+              \${localConfigs.length > 1 ? \`<button class="btn-remove-config" onclick="removeBotConfig(\${cfg.id})">❌</button>\` : ''}
+            \`;
+            listDiv.appendChild(row);
+          });
+        }
 
-          if (!username || !password) {
-            alert('Vui lòng nhập đầy đủ Username và Mật khẩu trong game!');
+        function renderTabs() {
+          const tabsDiv = document.getElementById('botTabs');
+          tabsDiv.innerHTML = '';
+          localConfigs.forEach((cfg) => {
+            const btn = document.createElement('button');
+            btn.className = 'tab-btn' + (cfg.id === currentSelectedBotId ? ' active' : '');
+            btn.textContent = cfg.username ? cfg.username : 'Bot ' + cfg.id;
+            btn.onclick = () => switchTab(cfg.id);
+            tabsDiv.appendChild(btn);
+          });
+        }
+
+        function switchTab(botId) {
+          currentSelectedBotId = botId;
+          renderTabs();
+          document.getElementById('logs').innerHTML = '';
+          document.getElementById('gameChat').innerHTML = '';
+          socket.emit('request_bot_data', botId);
+        }
+
+        function addBotConfigRow() {
+          if (localConfigs.length >= 5) {
+            alert('Tối đa chỉ hỗ trợ 5 Bot để đảm bảo tài nguyên RAM!');
             return;
           }
-
-          socket.emit('connect_bot', { username, password, saveCred });
+          const newId = localConfigs.length > 0 ? Math.max(...localConfigs.map(c => c.id)) + 1 : 1;
+          localConfigs.push({ id: newId, username: 'bot_phu_' + newId, password: 'phong123@' });
+          renderConfigRows();
+          renderTabs();
         }
 
-        function disconnectBot() {
-          socket.emit('disconnect_bot');
+        function removeBotConfig(id) {
+          localConfigs = localConfigs.filter(c => c.id !== id);
+          if (currentSelectedBotId === id && localConfigs.length > 0) {
+            currentSelectedBotId = localConfigs[0].id;
+          }
+          renderConfigRows();
+          renderTabs();
         }
 
-        socket.on('status_update', (data) => {
-          const tag = document.getElementById('statusTag');
-          tag.textContent = data.text;
-          tag.style.background = data.online ? '#2e7d32' : '#d32f2f';
-        });
+        function saveConfigList() {
+          localConfigs.forEach(cfg => {
+            const u = document.getElementById('user_' + cfg.id);
+            const p = document.getElementById('pass_' + cfg.id);
+            if (u) cfg.username = u.value.trim();
+            if (p) cfg.password = p.value.trim();
+          });
+          socket.emit('save_configs', localConfigs);
+          renderTabs();
+          alert('Đã lưu cấu hình danh sách Bot!');
+        }
+
+        function connectAllBots() {
+          saveConfigList();
+          socket.emit('connect_all_bots');
+        }
+
+        function disconnectAllBots() {
+          socket.emit('disconnect_all_bots');
+        }
 
         socket.on('stats_update', (data) => {
-          document.getElementById('statCoords').textContent = data.coords;
-          document.getElementById('statHealth').textContent = '❤️ ' + data.health + ' / 20';
-          document.getElementById('statFood').textContent = '🍖 ' + data.food + ' / 20';
-          document.getElementById('statNearest').textContent = data.nearest;
+          if (data.botId === currentSelectedBotId) {
+            document.getElementById('statCoords').textContent = data.coords;
+            document.getElementById('statHealth').textContent = '❤️ ' + data.health + ' / 20';
+            document.getElementById('statFood').textContent = '🍖 ' + data.food + ' / 20';
+            document.getElementById('statNearest').textContent = data.nearest;
+          }
         });
 
-        socket.on('log', (msg) => {
-          const logsDiv = document.getElementById('logs');
-          logsDiv.innerHTML += '<div class="log-entry">' + msg + '</div>';
-          logsDiv.scrollTop = logsDiv.scrollHeight;
+        socket.on('log', (data) => {
+          if (data.botId === currentSelectedBotId) {
+            const logsDiv = document.getElementById('logs');
+            logsDiv.innerHTML += '<div class="log-entry">' + data.msg + '</div>';
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+          }
         });
 
-        socket.on('chat_msg', (msg) => {
-          const chatDiv = document.getElementById('gameChat');
-          chatDiv.innerHTML += '<div class="chat-entry">' + msg + '</div>';
-          chatDiv.scrollTop = chatDiv.scrollHeight;
+        socket.on('chat_msg', (data) => {
+          if (data.botId === currentSelectedBotId) {
+            const chatDiv = document.getElementById('gameChat');
+            chatDiv.innerHTML += '<div class="chat-entry">' + data.msg + '</div>';
+            chatDiv.scrollTop = chatDiv.scrollHeight;
+          }
         });
 
         function sendCommand() {
           const input = document.getElementById('cmdInput');
           const message = input.value.trim();
           if (message) {
-            socket.emit('send_command', message);
+            socket.emit('send_command', { botId: currentSelectedBotId, cmd: message });
             input.value = '';
           }
         }
@@ -212,22 +263,18 @@ app.get('/', (req, res) => {
   `);
 });
 
-function logToWeb(msg) {
+function logToWeb(botId, msg) {
   const time = new Date().toLocaleTimeString('vi-VN');
   const formatted = '[' + time + '] ' + msg;
-  console.log(formatted);
-  io.emit('log', formatted);
+  console.log(`[Bot ${botId}] ${formatted}`);
+  io.emit('log', { botId, msg: formatted });
 }
 
-function updateStatus(text, online) {
-  currentStatusText = text;
-  isOnline = online;
-  io.emit('status_update', { text, online });
-}
+function sendStatsToWeb(botId) {
+  const bObj = activeBots[botId];
+  if (!bObj || !bObj.instance || !bObj.instance.entity) return;
 
-function sendStatsToWeb() {
-  if (!bot || !bot.entity) return;
-
+  const bot = bObj.instance;
   const pos = bot.entity.position;
   const coords = `X: ${pos.x.toFixed(1)}, Y: ${pos.y.toFixed(1)}, Z: ${pos.z.toFixed(1)}`;
   const health = bot.health !== undefined ? bot.health : 20;
@@ -246,79 +293,85 @@ function sendStatsToWeb() {
     }
   }
 
-  io.emit('stats_update', { coords, health, food, nearest: nearestPlayer });
+  io.emit('stats_update', { botId, coords, health, food, nearest: nearestPlayer });
 }
 
-function startBot() {
-  if (!isRunning) return;
-
-  clearAllSequenceTimeouts();
-  if (bot) {
-    try { bot.quit(); } catch(e) {}
-    bot = null;
+function startSingleBot(config) {
+  const botId = config.id;
+  
+  if (!activeBots[botId]) {
+    activeBots[botId] = { instance: null, isRunning: true, timeouts: [], hasLoggedIn: false, waitingForMenu: false, statsInterval: null, currentWindow: null };
   }
-  if (statsInterval) clearInterval(statsInterval);
-  hasLoggedIn = false;
-  waitingForMenuClick = false;
 
-  logToWeb("🔄 Đang kết nối tới " + lastSavedConfig.host + " với tên " + lastSavedConfig.username + "...");
-  updateStatus('Đang kết nối...', false);
+  const bObj = activeBots[botId];
+  bObj.isRunning = true;
 
-  bot = mineflayer.createBot({
-    host: lastSavedConfig.host,
-    username: lastSavedConfig.username,
+  clearBotTimeouts(botId);
+  if (bObj.instance) {
+    try { bObj.instance.quit(); } catch (e) {}
+    bObj.instance = null;
+  }
+  if (bObj.statsInterval) clearInterval(bObj.statsInterval);
+
+  bObj.hasLoggedIn = false;
+  bObj.waitingForMenu = false;
+
+  logToWeb(botId, "🔄 Đang kết nối tới kingmc.vn với tên " + config.username + "...");
+
+  const bot = mineflayer.createBot({
+    host: 'kingmc.vn',
+    username: config.username,
     version: '1.20.1'
   });
+
+  bObj.instance = bot;
 
   bot.on('message', (jsonMsg) => {
     const rawText = jsonMsg.toString().trim();
     if (rawText) {
-      io.emit('chat_msg', rawText);
+      io.emit('chat_msg', { botId, msg: rawText });
     }
   });
 
   bot.on('spawn', () => {
-    logToWeb("✅ Bot đã kết nối vào game thành công!");
-    updateStatus('Đang hoạt động (Online)', true);
+    logToWeb(botId, "✅ Bot đã vào game thành công!");
 
-    if (statsInterval) clearInterval(statsInterval);
-    statsInterval = setInterval(sendStatsToWeb, 1000);
+    if (bObj.statsInterval) clearInterval(bObj.statsInterval);
+    bObj.statsInterval = setInterval(() => sendStatsToWeb(botId), 1000);
 
-    if (!hasLoggedIn) {
-      hasLoggedIn = true;
+    if (!bObj.hasLoggedIn) {
+      bObj.hasLoggedIn = true;
 
-      // Bước 1: Chờ 5s gửi /login lần 1
+      // Chuỗi gửi login 2 lần
       const t1 = setTimeout(() => {
-        if (!isRunning || !bot || !isOnline) return;
-        bot.chat('/login ' + lastSavedConfig.password);
-        logToWeb("🔐 Đã gửi lệnh đăng nhập (/login) lần 1");
+        if (!bObj.isRunning || !bObj.instance) return;
+        bot.chat('/login ' + config.password);
+        logToWeb(botId, "🔐 Đã gửi lệnh /login lần 1");
 
-        // Bước 2: Chờ 3s gửi /login lần 2
         const t2 = setTimeout(() => {
-          if (!isRunning || !bot || !isOnline) return;
-          bot.chat('/login ' + lastSavedConfig.password);
-          logToWeb("🔐 Đã gửi lệnh đăng nhập (/login) lần 2");
+          if (!bObj.isRunning || !bObj.instance) return;
+          bot.chat('/login ' + config.password);
+          logToWeb(botId, "🔐 Đã gửi lệnh /login lần 2");
 
-          // Bước 3: Chờ 4s mới gửi /menu
           const t3 = setTimeout(() => {
-            if (!isRunning || !bot || !isOnline) return;
-            waitingForMenuClick = true; // Bật cờ cho phép click slot 24 sau lệnh /menu
+            if (!bObj.isRunning || !bObj.instance) return;
+            bObj.waitingForMenu = true;
             bot.chat('/menu');
-            logToWeb("📋 Đã gửi lệnh /menu");
+            logToWeb(botId, "📋 Đã gửi lệnh /menu");
           }, 4000);
 
-          activeSequenceTimeouts.push(t3);
+          bObj.timeouts.push(t3);
         }, 3000);
 
-        activeSequenceTimeouts.push(t2);
+        bObj.timeouts.push(t2);
       }, 5000);
 
-      activeSequenceTimeouts.push(t1);
+      bObj.timeouts.push(t1);
     }
   });
 
   bot.on('windowOpen', (window) => {
-    currentWindow = window;
+    bObj.currentWindow = window;
     let windowTitle = "Menu";
     try {
       windowTitle = window.title ? JSON.parse(window.title).text || window.title.toString() : "Menu";
@@ -326,134 +379,122 @@ function startBot() {
       windowTitle = window.title ? window.title.toString() : "Menu";
     }
 
-    logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
+    logToWeb(botId, "📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
 
-    // CHỈ CLICK SLOT 24 NẾU MENU NÀY MỞ RA DO LỆNH /MENU
-    if (waitingForMenuClick && window.slots.length >= 25) {
-      waitingForMenuClick = false; // Tắt cờ sau khi xử lý
+    // Chỉ click slot 24 sau lệnh /menu
+    if (bObj.waitingForMenu && window.slots.length >= 25) {
+      bObj.waitingForMenu = false;
 
       const t4 = setTimeout(() => {
-        if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
+        if (!bObj.isRunning || !bObj.instance || bObj.currentWindow !== window) return;
         try {
           bot.clickWindow(24, 0, 0);
-          logToWeb("👉 Đã tự động click slot thứ 24 theo lệnh /menu");
+          logToWeb(botId, "👉 Đã click slot thứ 24 theo lệnh /menu");
 
-          // Đợi 4s sau khi chọn slot 24 thì gửi lệnh /afk
           const t5 = setTimeout(() => {
-            if (!isRunning || !bot || !isOnline) return;
+            if (!bObj.isRunning || !bObj.instance) return;
             bot.chat('/afk');
-            logToWeb("💬 Đã gửi lệnh /afk");
+            logToWeb(botId, "💬 Đã gửi lệnh /afk");
           }, 4000);
 
-          activeSequenceTimeouts.push(t5);
+          bObj.timeouts.push(t5);
         } catch (err) {
-          logToWeb("⚠️ Lỗi click slot 24: " + err.message);
+          logToWeb(botId, "⚠️ Lỗi click slot 24: " + err.message);
         }
       }, 3000);
 
-      activeSequenceTimeouts.push(t4);
+      bObj.timeouts.push(t4);
     } else if (window.slots.length === 63 || window.slots.length === 54 || window.slots.length >= 10) {
-      // MENU KHI GỬI LỆNH /AFK: Chọn ngẫu nhiên 1 slot từ 0 đến 9
+      // Menu AFK: Ngẫu nhiên slot từ 0 đến 9
       const t6 = setTimeout(() => {
-        if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
+        if (!bObj.isRunning || !bObj.instance || bObj.currentWindow !== window) return;
         try {
-          const randomSlot = Math.floor(Math.random() * 10); // Ngẫu nhiên 0 đến 9
+          const randomSlot = Math.floor(Math.random() * 10);
           bot.clickWindow(randomSlot, 0, 0);
-          logToWeb("🎲 Đã chọn ngẫu nhiên slot thứ " + randomSlot + " trong menu AFK");
+          logToWeb(botId, "🎲 Đã chọn ngẫu nhiên slot thứ " + randomSlot + " trong menu AFK");
         } catch (err) {
-          logToWeb("⚠️ Lỗi click slot ngẫu nhiên: " + err.message);
+          logToWeb(botId, "⚠️ Lỗi click slot ngẫu nhiên: " + err.message);
         }
       }, 1500);
 
-      activeSequenceTimeouts.push(t6);
+      bObj.timeouts.push(t6);
     }
   });
 
   bot.on('windowClose', () => {
-    currentWindow = null;
+    bObj.currentWindow = null;
   });
 
   bot.on('end', (reason) => {
-    logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason);
+    logToWeb(botId, "⚠️ Bot ngắt kết nối do: " + reason);
+    clearBotTimeouts(botId);
+    if (bObj.statsInterval) clearInterval(bObj.statsInterval);
 
-    clearAllSequenceTimeouts();
-    if (statsInterval) clearInterval(statsInterval);
-    hasLoggedIn = false;
-    waitingForMenuClick = false;
-    updateStatus('Mất kết nối, chờ reconnect...', false);
-
-    if (isRunning) {
-      logToWeb("⏳ Tự động kết nối lại (reconnect) sau đúng 10 giây...");
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      reconnectTimeout = setTimeout(() => {
-        if (isRunning) {
-          startBot();
+    if (bObj.isRunning) {
+      logToWeb(botId, "⏳ Tự động kết nối lại (reconnect) sau 10 giây...");
+      setTimeout(() => {
+        if (bObj.isRunning) {
+          startSingleBot(config);
         }
       }, 10000);
     }
   });
 
   bot.on('error', (err) => {
-    logToWeb("❌ Lỗi Bot: " + err.message);
-    clearAllSequenceTimeouts();
-    updateStatus('Lỗi kết nối', false);
+    logToWeb(botId, "❌ Lỗi Bot: " + err.message);
+    clearBotTimeouts(botId);
   });
 }
 
 io.on('connection', (socket) => {
-  socket.on('get_config', () => {
-    socket.emit('load_config', {
-      username: lastSavedConfig.username,
-      password: lastSavedConfig.password
+  socket.on('get_initial_data', () => {
+    socket.emit('init_configs', botsConfig);
+  });
+
+  socket.on('save_configs', (configs) => {
+    if (configs && Array.isArray(configs)) {
+      botsConfig = configs.slice(0, MAX_BOTS);
+    }
+  });
+
+  socket.on('connect_all_bots', () => {
+    // Kết nối lần lượt từng bot cách nhau 3 giây (Staggered connect)
+    botsConfig.forEach((cfg, idx) => {
+      setTimeout(() => {
+        startSingleBot(cfg);
+      }, idx * 3000);
     });
   });
 
-  socket.on('request_current_status', () => {
-    socket.emit('status_update', { text: currentStatusText, online: isOnline });
-  });
-
-  socket.on('connect_bot', (data) => {
-    if (data.saveCred) {
-      lastSavedConfig.username = data.username;
-      lastSavedConfig.password = data.password;
-    }
-    lastSavedConfig.username = data.username;
-    lastSavedConfig.password = data.password;
-
-    isRunning = true;
-    startBot();
-  });
-
-  socket.on('disconnect_bot', () => {
-    isRunning = false;
-    clearAllSequenceTimeouts();
-    if (reconnectTimeout) {
-      clearTimeout(reconnectTimeout);
-      reconnectTimeout = null;
-    }
-    if (statsInterval) clearInterval(statsInterval);
-    if (bot) {
-      try { bot.quit(); } catch (e) {}
-      bot = null;
-    }
-    updateStatus('Đã ngắt kết nối thủ công', false);
-    logToWeb("🛑 Bạn đã ngắt kết nối bot thủ công.");
-  });
-
-  socket.on('send_command', (cmd) => {
-    if (bot && isRunning && isOnline) {
-      // Nếu người dùng chủ động gửi lệnh /menu từ ô chat trên Web, cũng sẽ kích hoạt cờ waitingForMenuClick
-      if (cmd.trim().toLowerCase() === '/menu') {
-        waitingForMenuClick = true;
+  socket.on('disconnect_all_bots', () => {
+    Object.keys(activeBots).forEach(botId => {
+      const bObj = activeBots[botId];
+      if (bObj) {
+        bObj.isRunning = false;
+        clearBotTimeouts(botId);
+        if (bObj.statsInterval) clearInterval(bObj.statsInterval);
+        if (bObj.instance) {
+          try { bObj.instance.quit(); } catch (e) {}
+          bObj.instance = null;
+        }
+        logToWeb(botId, "🛑 Đã ngắt kết nối thủ công.");
       }
-      bot.chat(cmd);
-      logToWeb("📤 [Web gửi]: " + cmd);
-    } else {
-      socket.emit('log', "⚠️ Bot chưa kết nối!");
+    });
+  });
+
+  socket.on('send_command', (data) => {
+    const { botId, cmd } = data;
+    const bObj = activeBots[botId];
+    if (bObj && bObj.instance && bObj.isRunning) {
+      if (cmd.trim().toLowerCase() === '/menu') {
+        bObj.waitingForMenu = true;
+      }
+      bObj.instance.chat(cmd);
+      logToWeb(botId, "📤 [Web gửi]: " + cmd);
     }
   });
 });
 
 server.listen(PORT, () => {
-  console.log("Server Dashboard đang chạy hoàn hảo tại cổng " + PORT);
+  console.log("Multi-Bot Dashboard đang chạy hoàn hảo tại cổng " + PORT);
 });
