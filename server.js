@@ -10,12 +10,10 @@ const io = new Server(server);
 const PORT = process.env.PORT || 10000;
 const MAX_BOTS = 5;
 
-// Lưu trữ cấu hình 5 bot (Mặc định khởi tạo 1 bot đầu tiên)
 let botsConfig = [
   { id: 1, username: '_caubemocoi_', password: 'phong123@' }
 ];
 
-// Đối tượng quản lý các instance bot và trạng thái riêng biệt
 const activeBots = {};
 
 function clearBotTimeouts(botId) {
@@ -40,7 +38,6 @@ app.get('/', (req, res) => {
         .container { max-width: 1100px; margin: 0 auto; background: #ffffff; padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border: 1px solid #ddd; }
         h2 { margin-top: 0; color: #2e7d32; display: flex; align-items: center; justify-content: space-between; }
         
-        /* Form thêm/quản lý danh sách 5 Bot */
         .config-box { background: #fafafa; border: 1px solid #ccc; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
         .bot-config-row { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; }
         .bot-config-row input { flex: 1; padding: 8px 12px; border-radius: 4px; border: 1px solid #ccc; outline: none; }
@@ -52,18 +49,15 @@ app.get('/', (req, res) => {
         .btn-disconnect-all { background: #c62828; }
         .btn-add-bot { background: #0288d1; }
 
-        /* Navigation Tabs cho từng Bot */
         .bot-tabs { display: flex; gap: 5px; border-bottom: 2px solid #ddd; margin-bottom: 15px; overflow-x: auto; }
         .tab-btn { background: #e0e0e0; color: #333; padding: 10px 16px; border-radius: 6px 6px 0 0; cursor: pointer; border: none; font-weight: bold; }
         .tab-btn.active { background: #2e7d32; color: #fff; }
 
-        /* Bảng thông số: Tọa độ, HP, Độ đói, Player gần nhất */
         .stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
         .stat-card { background: #f9f9f9; padding: 12px; border-radius: 6px; border-left: 4px solid #2e7d32; font-size: 13px; border: 1px solid #e0e0e0; }
         .stat-card b { color: #2e7d32; display: block; margin-top: 4px; font-size: 15px; font-family: monospace; }
         @media (max-width: 768px) { .stats-bar { grid-template-columns: 1fr 1fr; } }
 
-        /* Panel Chat & Logs */
         .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
@@ -86,7 +80,6 @@ app.get('/', (req, res) => {
           <span class="status-tag" id="globalStatus">Sẵn sàng</span>
         </h2>
         
-        <!-- Cấu hình danh sách 5 tài khoản -->
         <div class="config-box">
           <div id="botConfigList"></div>
           <div style="margin-top: 10px;">
@@ -100,10 +93,8 @@ app.get('/', (req, res) => {
           <button class="btn-disconnect-all" onclick="disconnectAllBots()">🛑 Ngắt Kết Nối Tất Cả</button>
         </div>
 
-        <!-- Navigation Tabs chọn Bot để xem chi tiết -->
         <div class="bot-tabs" id="botTabs"></div>
 
-        <!-- Bảng hiển thị thông số Bot đang chọn -->
         <div class="stats-bar">
           <div class="stat-card">Tọa độ (X, Y, Z)<b id="statCoords">X: --, Y: --, Z: --</b></div>
           <div class="stat-card">Máu (HP)<b id="statHealth">❤️ -- / 20</b></div>
@@ -152,7 +143,7 @@ app.get('/', (req, res) => {
             row.innerHTML = \`
               <span style="font-weight:bold; min-width:60px;">Bot \${index + 1}:</span>
               <input type="text" placeholder="Username" value="\${cfg.username}" id="user_\${cfg.id}" />
-              <input type="password" placeholder="Password /login" value="\${cfg.password}" id="pass_\${cfg.id}" />
+              <input type="password" placeholder="Password" value="\${cfg.password}" id="pass_\${cfg.id}" />
               \${localConfigs.length > 1 ? \`<button class="btn-remove-config" onclick="removeBotConfig(\${cfg.id})">❌</button>\` : ''}
             \`;
             listDiv.appendChild(row);
@@ -181,7 +172,7 @@ app.get('/', (req, res) => {
 
         function addBotConfigRow() {
           if (localConfigs.length >= 5) {
-            alert('Tối đa chỉ hỗ trợ 5 Bot để đảm bảo tài nguyên RAM!');
+            alert('Tối đa chỉ hỗ trợ 5 Bot!');
             return;
           }
           const newId = localConfigs.length > 0 ? Math.max(...localConfigs.map(c => c.id)) + 1 : 1;
@@ -300,7 +291,7 @@ function startSingleBot(config) {
   const botId = config.id;
   
   if (!activeBots[botId]) {
-    activeBots[botId] = { instance: null, isRunning: true, timeouts: [], hasLoggedIn: false, waitingForMenu: false, statsInterval: null, currentWindow: null };
+    activeBots[botId] = { instance: null, isRunning: true, timeouts: [], hasAuthenticated: false, waitingForMenu: false, statsInterval: null, currentWindow: null };
   }
 
   const bObj = activeBots[botId];
@@ -313,7 +304,7 @@ function startSingleBot(config) {
   }
   if (bObj.statsInterval) clearInterval(bObj.statsInterval);
 
-  bObj.hasLoggedIn = false;
+  bObj.hasAuthenticated = false;
   bObj.waitingForMenu = false;
 
   logToWeb(botId, "🔄 Đang kết nối tới kingmc.vn với tên " + config.username + "...");
@@ -326,10 +317,30 @@ function startSingleBot(config) {
 
   bObj.instance = bot;
 
+  // Lắng nghe tin nhắn từ server để tự động phát hiện lệnh Register hay Login
   bot.on('message', (jsonMsg) => {
     const rawText = jsonMsg.toString().trim();
     if (rawText) {
       io.emit('chat_msg', { botId, msg: rawText });
+
+      const lowerText = rawText.toLowerCase();
+      // Nếu server yêu cầu đăng ký tài khoản mới (lần đầu)
+      if (!bObj.hasAuthenticated && (lowerText.includes('register') || lowerText.includes('đăng ký'))) {
+        bObj.hasAuthenticated = true;
+        clearBotTimeouts(botId); // Hủy các hẹn giờ login cũ nếu có
+
+        logToWeb(botId, "📝 Phát hiện tài khoản mới, đang tự động đăng ký (/register)...");
+        bot.chat(`/register ${config.password} ${config.password}`);
+
+        // Sau khi register thành công, đợi 4s rồi tiến hành gửi /menu
+        const tMenu = setTimeout(() => {
+          if (!bObj.isRunning || !bObj.instance) return;
+          bObj.waitingForMenu = true;
+          bot.chat('/menu');
+          logToWeb(botId, "📋 Đã gửi lệnh /menu sau khi đăng ký");
+        }, 4000);
+        bObj.timeouts.push(tMenu);
+      }
     }
   });
 
@@ -339,22 +350,21 @@ function startSingleBot(config) {
     if (bObj.statsInterval) clearInterval(bObj.statsInterval);
     bObj.statsInterval = setInterval(() => sendStatsToWeb(botId), 1000);
 
-    if (!bObj.hasLoggedIn) {
-      bObj.hasLoggedIn = true;
-
-      // Chuỗi gửi login 2 lần
+    // Nếu đã đăng ký trước đó (hoặc server tự nhận diện), thực hiện gửi /login 2 lần
+    if (!bObj.hasAuthenticated) {
       const t1 = setTimeout(() => {
-        if (!bObj.isRunning || !bObj.instance) return;
+        if (!bObj.isRunning || !bObj.instance || bObj.hasAuthenticated) return;
         bot.chat('/login ' + config.password);
         logToWeb(botId, "🔐 Đã gửi lệnh /login lần 1");
 
         const t2 = setTimeout(() => {
-          if (!bObj.isRunning || !bObj.instance) return;
+          if (!bObj.isRunning || !bObj.instance || bObj.hasAuthenticated) return;
           bot.chat('/login ' + config.password);
           logToWeb(botId, "🔐 Đã gửi lệnh /login lần 2");
 
           const t3 = setTimeout(() => {
             if (!bObj.isRunning || !bObj.instance) return;
+            bObj.hasAuthenticated = true; // Đánh dấu đã xác thực xong
             bObj.waitingForMenu = true;
             bot.chat('/menu');
             logToWeb(botId, "📋 Đã gửi lệnh /menu");
@@ -458,7 +468,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('connect_all_bots', () => {
-    // Kết nối lần lượt từng bot cách nhau 3 giây (Staggered connect)
     botsConfig.forEach((cfg, idx) => {
       setTimeout(() => {
         startSingleBot(cfg);
