@@ -3,6 +3,7 @@
 
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const dns = require('dns').promises;
 const { Server } = require('socket.io');
@@ -10,14 +11,13 @@ const mineflayer = require('mineflayer');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  maxHttpBufferSize: 1e6
-});
+const io = new Server(server, { maxHttpBufferSize: 1e6 });
 
 const PORT = Number(process.env.PORT || 10000);
 const HOST = process.env.MC_HOST || 'kingmc.vn';
 const VERSION = process.env.MC_VERSION || '1.21.11';
 const TCP_TIMEOUT = 10000;
+const CONNECT_TIMEOUT = 45000;
 const RECONNECT_DELAY = 10000;
 
 let bot = null;
@@ -25,33 +25,23 @@ let isRunning = false;
 let isOnline = false;
 let isConnecting = false;
 let statusText = 'Đang ngắt kết nối';
-
 let reconnectTimer = null;
 let statsTimer = null;
+let connectWatchdog = null;
 let sequenceTimers = [];
-
 let currentWindow = null;
 let expectedAction = null;
-
 let activeUsername = '';
 let activePassword = '';
-
 let connectionId = 0;
 let intentionalEnd = false;
 
 const MAX_LOGS = 150;
 const logHistory = [];
 
-// ==============================
-// LOG VÀ TRẠNG THÁI
-// ==============================
-
 function log(message) {
-  const line =
-    `[${new Date().toLocaleTimeString('vi-VN')}] ${String(message)}`;
-
+  const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${String(message)}`;
   console.log(line);
-
   logHistory.push(line);
 
   if (logHistory.length > MAX_LOGS) {
@@ -64,59 +54,44 @@ function log(message) {
 function setStatus(text, online = false) {
   statusText = text;
   isOnline = online;
-
-  io.emit('status_update', {
-    text,
-    online
-  });
+  io.emit('status_update', { text, online });
 }
 
 function clearReconnect() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
 }
 
 function clearStats() {
-  if (statsTimer) {
-    clearInterval(statsTimer);
-    statsTimer = null;
-  }
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = null;
+}
+
+function clearWatchdog() {
+  if (connectWatchdog) clearTimeout(connectWatchdog);
+  connectWatchdog = null;
 }
 
 function clearSequenceTimers() {
-  for (const timer of sequenceTimers) {
-    clearTimeout(timer);
-  }
-
+  for (const timer of sequenceTimers) clearTimeout(timer);
   sequenceTimers = [];
 }
 
 function later(fn, delay, id) {
   const timer = setTimeout(() => {
-    sequenceTimers = sequenceTimers.filter(
-      item => item !== timer
-    );
+    sequenceTimers = sequenceTimers.filter(t => t !== timer);
 
-    if (
-      id !== connectionId ||
-      !isRunning ||
-      !bot
-    ) {
-      return;
-    }
+    if (id !== connectionId || !isRunning || !bot) return;
 
     fn();
   }, delay);
 
   sequenceTimers.push(timer);
-
   return timer;
 }
 
 // ==============================
-// TÌM ĐỊA CHỈ VÀ CỔNG MINECRAFT
+// DNS VÀ TÌM ĐỊA CHỈ MINECRAFT
 // ==============================
 
 async function resolveMinecraftEndpoint() {
@@ -125,18 +100,14 @@ async function resolveMinecraftEndpoint() {
   let records = [];
 
   try {
-    records = await dns.resolveSrv(
-      `_minecraft._tcp.${HOST}`
-    );
-
+    records = await dns.resolveSrv(`_minecraft._tcp.${HOST}`);
     log(`[SRV RECORDS] ${JSON.stringify(records)}`);
   } catch (err) {
-    log(`[SRV] Không lấy được bản ghi SRV: ${err.code || err.message}`);
+    log(`[SRV] Không lấy được SRV: ${err.code || err.message}`);
   }
 
-  // Không có SRV thì dùng cổng Java mặc định.
-  if (!records || records.length === 0) {
-    log('[INFO] Không tìm thấy SRV, thử cổng mặc định 25565.');
+  if (!records.length) {
+    log('[INFO] Không có SRV, dùng cổng mặc định 25565.');
 
     return [{
       host: HOST,
@@ -144,70 +115,100 @@ async function resolveMinecraftEndpoint() {
     }];
   }
 
-  // Ưu tiên bản ghi có priority thấp hơn.
   records.sort((a, b) => a.priority - b.priority);
 
-  return records.map(record => ({
-    host: record.name.replace(/\.$/, ''),
-    port: record.port
+  return records.map(r => ({
+    host: r.name.replace(/\.$/, ''),
+    port: r.port
   }));
 }
 
-// Kiểm tra TCP trước khi tạo bot.
-function testTCP(host, port) {
+// ==============================
+// KIỂM TRA KẾT NỐI TCP
+// ==============================
+
+function testTCP(host, port, timeout = TCP_TIMEOUT) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({
-      host,
-      port
-    });
+    const socket = net.createConnection({ host, port });
 
-    let finished = false;
+    let done = false;
 
-    const finish = (error) => {
-      if (finished) return;
+    const finish = err => {
+      if (done) return;
 
-      finished = true;
+      done = true;
       socket.destroy();
 
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
+      err ? reject(err) : resolve();
     };
 
-    socket.setTimeout(TCP_TIMEOUT);
+    socket.setTimeout(timeout);
 
-    socket.on('connect', () => {
-      finish();
-    });
+    socket.once('connect', () => finish());
 
-    socket.on('timeout', () => {
-      const err = new Error('TCP connection timeout');
+    socket.once('timeout', () => {
+      const err = new Error(`TCP timeout sau ${timeout}ms`);
       err.code = 'ETIMEDOUT';
       finish(err);
     });
 
-    socket.on('error', err => {
-      finish(err);
-    });
+    socket.once('error', finish);
   });
 }
+
+// ==============================
+// KIỂM TRA HTTPS
+// ==============================
+
+function testHTTPS(host = 'www.google.com', timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: host,
+      method: 'HEAD',
+      path: '/',
+      timeout
+    }, res => {
+      res.resume();
+      resolve({
+        statusCode: res.statusCode
+      });
+    });
+
+    req.once('timeout', () => {
+      req.destroy(
+        Object.assign(
+          new Error('HTTPS timeout'),
+          { code: 'ETIMEDOUT' }
+        )
+      );
+    });
+
+    req.once('error', reject);
+    req.end();
+  });
+}
+
+// ==============================
+// TÌM ENDPOINT HOẠT ĐỘNG
+// ==============================
 
 async function findWorkingEndpoint() {
   const candidates = await resolveMinecraftEndpoint();
 
+  let lastError;
+
   for (const endpoint of candidates) {
-    log(`[TARGET] ${endpoint.host}`);
-    log(`[PORT] ${endpoint.port}`);
+    log(`[TARGET] ${endpoint.host}:${endpoint.port}`);
 
     try {
       await testTCP(endpoint.host, endpoint.port);
 
-      log('[SUCCESS] Kết nối TCP thành công!');
+      log('[SUCCESS] Kết nối TCP tới Minecraft thành công.');
 
       return endpoint;
     } catch (err) {
+      lastError = err;
+
       log(
         `[TCP ERROR] ${err.code || 'ERROR'}: ${err.message}`
       );
@@ -215,12 +216,77 @@ async function findWorkingEndpoint() {
   }
 
   throw new Error(
-    'Không thể kết nối TCP tới bất kỳ địa chỉ máy chủ nào.'
+    `Không thể kết nối TCP tới máy chủ Minecraft: ${
+      lastError?.code || lastError?.message || 'unknown'
+    }`
   );
 }
 
 // ==============================
-// GUI
+// TRANG CHẨN ĐOÁN MẠNG
+// ==============================
+
+app.get('/diagnostics', async (req, res) => {
+  const result = {
+    host: HOST,
+    checkedAt: new Date().toISOString(),
+    dns: null,
+    https: null,
+    minecraftTcp: null
+  };
+
+  // Kiểm tra DNS
+  try {
+    result.dns = await dns.lookup('www.google.com');
+  } catch (err) {
+    result.dns = {
+      error: err.code || err.message
+    };
+  }
+
+  // Kiểm tra HTTPS
+  try {
+    result.https = await testHTTPS();
+  } catch (err) {
+    result.https = {
+      error: err.code || err.message
+    };
+  }
+
+  // Kiểm tra TCP Minecraft
+  try {
+    const endpoints = await resolveMinecraftEndpoint();
+    const checks = [];
+
+    for (const endpoint of endpoints) {
+      try {
+        await testTCP(endpoint.host, endpoint.port);
+
+        checks.push({
+          ...endpoint,
+          ok: true
+        });
+      } catch (err) {
+        checks.push({
+          ...endpoint,
+          ok: false,
+          error: err.code || err.message
+        });
+      }
+    }
+
+    result.minecraftTcp = checks;
+  } catch (err) {
+    result.minecraftTcp = {
+      error: err.code || err.message
+    };
+  }
+
+  res.json(result);
+});
+
+// ==============================
+// XỬ LÝ GUI MINECRAFT
 // ==============================
 
 function getWindowTitle(window) {
@@ -234,13 +300,11 @@ function getWindowTitle(window) {
 
 function publishWindow(window) {
   const slots = (window.slots || []).map(item => {
-    if (!item) return null;
-
-    return {
+    return item ? {
       name: item.name || 'unknown',
       count: item.count || 1,
       displayName: item.displayName || item.name || 'Item'
-    };
+    } : null;
   });
 
   io.emit('window_open', {
@@ -274,67 +338,48 @@ function clickSlot(index, label = 'Dashboard') {
 }
 
 // ==============================
-// THÔNG TIN BOT
+// THỐNG KÊ BOT
 // ==============================
 
 function sendStats() {
-  if (!bot || !bot.entity) return;
+  if (!bot?.entity) return;
 
   const pos = bot.entity.position;
 
-  let nearest = 'Không có';
-
   const nearby = Object.values(bot.players || {})
-    .filter(player =>
-      player.username !== bot.username &&
-      player.entity
-    );
+    .filter(p => p.username !== bot.username && p.entity);
 
-  if (nearby.length > 0) {
-    nearby.sort((a, b) =>
-      a.entity.position.distanceTo(pos) -
-      b.entity.position.distanceTo(pos)
-    );
-
-    nearest = nearby[0].username;
-  }
+  nearby.sort((a, b) => {
+    return a.entity.position.distanceTo(pos) -
+      b.entity.position.distanceTo(pos);
+  });
 
   io.emit('stats_update', {
-    coords:
-      `X: ${pos.x.toFixed(1)}, ` +
-      `Y: ${pos.y.toFixed(1)}, ` +
-      `Z: ${pos.z.toFixed(1)}`,
-
-    health: Number.isFinite(bot.health)
-      ? bot.health
-      : '--',
-
-    food: Number.isFinite(bot.food)
-      ? bot.food
-      : '--',
-
-    nearest
+    coords: `X: ${pos.x.toFixed(1)}, Y: ${pos.y.toFixed(1)}, Z: ${pos.z.toFixed(1)}`,
+    health: Number.isFinite(bot.health) ? bot.health : '--',
+    food: Number.isFinite(bot.food) ? bot.food : '--',
+    nearest: nearby[0]?.username || 'Không có'
   });
 }
 
 // ==============================
-// CHUỖI LỆNH SAU KHI SPAWN
+// QUY TRÌNH LOGIN VÀ AFK
 // ==============================
 
 function runAfterSpawn(id) {
   if (activePassword) {
     later(() => {
-      if (!bot || !isOnline) return;
-
-      bot.chat(`/login ${activePassword}`);
-      log('Đã gửi lệnh đăng nhập.');
+      if (bot && isOnline) {
+        bot.chat(`/login ${activePassword}`);
+        log('Đã gửi lệnh đăng nhập.');
+      }
     }, 5000, id);
 
     later(() => {
-      if (!bot || !isOnline) return;
-
-      bot.chat('/login');
-      log('Đã gửi lệnh /login lần hai.');
+      if (bot && isOnline) {
+        bot.chat('/login');
+        log('Đã gửi lệnh /login lần hai.');
+      }
     }, 8000, id);
   }
 
@@ -349,13 +394,13 @@ function runAfterSpawn(id) {
 }
 
 // ==============================
-// KẾT NỐI LẠI
+// TỰ ĐỘNG KẾT NỐI LẠI
 // ==============================
 
 function scheduleReconnect(reason) {
-  if (!isRunning || intentionalEnd) return;
+  if (!isRunning || intentionalEnd || reconnectTimer) return;
 
-  clearReconnect();
+  clearWatchdog();
   clearSequenceTimers();
   clearStats();
 
@@ -381,7 +426,7 @@ function scheduleReconnect(reason) {
 }
 
 // ==============================
-// TẠO BOT
+// KHỞI ĐỘNG BOT
 // ==============================
 
 async function startBot() {
@@ -390,6 +435,7 @@ async function startBot() {
   clearReconnect();
   clearSequenceTimers();
   clearStats();
+  clearWatchdog();
 
   const id = ++connectionId;
 
@@ -456,14 +502,40 @@ async function startBot() {
 
   bot = newBot;
 
-  newBot.on('login', () => {
-    if (id !== connectionId) return;
+  // Timeout nếu bot không spawn
+  connectWatchdog = setTimeout(() => {
+    if (id !== connectionId || !isRunning || isOnline) return;
 
-    log('Đã hoàn tất bước login giao thức.');
+    log(
+      `[TIMEOUT] Không spawn sau ${CONNECT_TIMEOUT / 1000} giây; sẽ thử kết nối lại.`
+    );
+
+    const stuckBot = bot;
+
+    bot = null;
+    isConnecting = false;
+
+    connectionId++;
+
+    try {
+      stuckBot?.quit('Connection timeout');
+    } catch {}
+
+    scheduleReconnect('Connection timeout');
+  }, CONNECT_TIMEOUT);
+
+  // Sự kiện login
+  newBot.on('login', () => {
+    if (id === connectionId) {
+      log('Đã hoàn tất bước login giao thức.');
+    }
   });
 
+  // Sự kiện spawn
   newBot.on('spawn', () => {
     if (id !== connectionId) return;
+
+    clearWatchdog();
 
     isConnecting = false;
 
@@ -478,6 +550,7 @@ async function startBot() {
     runAfterSpawn(id);
   });
 
+  // Tin nhắn trong game
   newBot.on('message', message => {
     if (id !== connectionId) return;
 
@@ -488,23 +561,22 @@ async function startBot() {
     }
   });
 
+  // Khi bị kick
   newBot.on('kicked', (reason, loggedIn) => {
     if (id !== connectionId) return;
 
-    const detail =
-      typeof reason === 'string'
-        ? reason
-        : JSON.stringify(reason);
+    const detail = typeof reason === 'string'
+      ? reason
+      : JSON.stringify(reason);
 
-    log(
-      `[KICKED] loggedIn=${loggedIn}; reason=${detail}`
-    );
+    log(`[KICKED] loggedIn=${loggedIn}; reason=${detail}`);
 
     isRunning = false;
     intentionalEnd = true;
     isConnecting = false;
 
     clearReconnect();
+    clearWatchdog();
     clearSequenceTimers();
     clearStats();
 
@@ -514,14 +586,14 @@ async function startBot() {
     );
   });
 
+  // Khi mở GUI
   newBot.on('windowOpen', window => {
     if (id !== connectionId) return;
 
     currentWindow = window;
 
     log(
-      `Đã mở GUI: ${getWindowTitle(window)} ` +
-      `(${window.slots.length} ô).`
+      `Đã mở GUI: ${getWindowTitle(window)} (${window.slots.length} ô).`
     );
 
     publishWindow(window);
@@ -540,6 +612,7 @@ async function startBot() {
           expectedAction = 'RANDOM_0_9';
 
           bot.chat('/afk');
+
           log('Đã gửi lệnh /afk.');
         }, 4000, id);
       }, 3000, id);
@@ -550,13 +623,15 @@ async function startBot() {
       later(() => {
         if (currentWindow !== window) return;
 
-        const slot = Math.floor(Math.random() * 10);
-
-        clickSlot(slot, 'lựa chọn menu');
+        clickSlot(
+          Math.floor(Math.random() * 10),
+          'lựa chọn menu'
+        );
       }, 1500, id);
     }
   });
 
+  // Khi đóng GUI
   newBot.on('windowClose', () => {
     if (id !== connectionId) return;
 
@@ -565,32 +640,39 @@ async function startBot() {
     io.emit('window_close');
   });
 
+  // Khi máu thay đổi
   newBot.on('health', () => {
     if (id === connectionId) {
       sendStats();
     }
   });
 
+  // Khi mất kết nối
   newBot.on('end', reason => {
     if (id !== connectionId) return;
 
     bot = null;
     isConnecting = false;
 
+    clearWatchdog();
+
     scheduleReconnect(reason);
   });
 
+  // Khi xảy ra lỗi
   newBot.on('error', err => {
     if (id !== connectionId) return;
 
     log(`[ERROR] ${err.code || ''} ${err.message}`);
 
     setStatus('Có lỗi kết nối; xem nhật ký.', false);
+
+    // Watchdog hoặc event end sẽ xử lý tiếp.
   });
 }
 
 // ==============================
-// NGẮT BOT
+// NGẮT KẾT NỐI BOT
 // ==============================
 
 function closeBot(reason = 'Đã ngắt kết nối') {
@@ -601,6 +683,7 @@ function closeBot(reason = 'Đã ngắt kết nối') {
   connectionId++;
 
   clearReconnect();
+  clearWatchdog();
   clearSequenceTimers();
   clearStats();
 
@@ -624,7 +707,7 @@ function closeBot(reason = 'Đã ngắt kết nối') {
 }
 
 // ==============================
-// DASHBOARD
+// GIAO DIỆN DASHBOARD
 // ==============================
 
 app.get('/', (req, res) => {
@@ -637,73 +720,26 @@ app.get('/', (req, res) => {
 
 <style>
 *{box-sizing:border-box}
-body{
-  margin:0;padding:18px;background:#f3f5f7;
-  color:#222;font:15px Arial,sans-serif
-}
-main{
-  max-width:1050px;margin:auto;background:white;
-  padding:22px;border-radius:12px;
-  box-shadow:0 3px 18px #0001
-}
-h2{
-  display:flex;justify-content:space-between;
-  gap:12px;flex-wrap:wrap;color:#26733a
-}
-.grid{
-  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:12px
-}
-.box{
-  border:1px solid #ddd;border-radius:8px;
-  padding:12px;margin:12px 0
-}
-label{
-  display:block;font-weight:bold;
-  font-size:13px;margin:5px 0
-}
-input{
-  width:100%;padding:11px;border:1px solid #bbb;
-  border-radius:6px;margin:4px 0 8px
-}
-button{
-  border:0;border-radius:6px;padding:11px 15px;
-  color:white;background:#288b45;
-  font-weight:bold;cursor:pointer;margin:3px
-}
+body{margin:0;padding:18px;background:#f3f5f7;color:#222;font:15px Arial,sans-serif}
+main{max-width:1050px;margin:auto;background:white;padding:22px;border-radius:12px;box-shadow:0 3px 18px #0001}
+h2{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#26733a}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.box{border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0}
+label{display:block;font-weight:bold;font-size:13px;margin:5px 0}
+input{width:100%;padding:11px;border:1px solid #bbb;border-radius:6px;margin:4px 0 8px}
+button{border:0;border-radius:6px;padding:11px 15px;color:white;background:#288b45;font-weight:bold;cursor:pointer;margin:3px}
 button.red{background:#c43d3d}
 button.blue{background:#087db5}
 .actions{display:flex;flex-wrap:wrap;gap:6px}
-.stats{
-  display:grid;grid-template-columns:repeat(4,1fr);
-  gap:8px
-}
-.stat{
-  background:#f7f8f8;border:1px solid #ddd;
-  padding:10px;border-radius:7px;font-size:13px
-}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.stat{background:#f7f8f8;border:1px solid #ddd;padding:10px;border-radius:7px;font-size:13px}
 .stat b{display:block;margin-top:6px}
-.panel{
-  height:230px;overflow:auto;background:#101820;
-  color:#e7edf1;padding:10px;border-radius:7px;
-  font:12px/1.5 Consolas,monospace;
-  white-space:pre-wrap;overflow-wrap:anywhere
-}
+.panel{height:230px;overflow:auto;background:#101820;color:#e7edf1;padding:10px;border-radius:7px;font:12px/1.5 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 #gui{display:none}
-.slots{
-  display:grid;grid-template-columns:repeat(9,minmax(0,1fr));
-  gap:4px
-}
-.slot{
-  min-height:42px;background:#777;color:white;
-  border:2px outset #bbb;display:grid;
-  place-items:center;text-align:center;
-  font-size:10px;overflow-wrap:anywhere;cursor:pointer
-}
+.slots{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:4px}
+.slot{min-height:42px;background:#777;color:white;border:2px outset #bbb;display:grid;place-items:center;text-align:center;font-size:10px;overflow-wrap:anywhere;cursor:pointer}
 .status{font-size:13px;color:#555}
-@media(max-width:700px){
-  .grid,.stats{grid-template-columns:1fr 1fr}
-}
+@media(max-width:700px){.grid,.stats{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 
@@ -711,194 +747,180 @@ button.blue{background:#087db5}
 <main>
 
 <h2>
-  <span>🤖 Minecraft Bot Dashboard</span>
-  <span id="status" class="status">Đang ngắt kết nối</span>
+<span>🤖 Minecraft Bot Dashboard</span>
+<span id="status" class="status">Đang ngắt kết nối</span>
 </h2>
 
 <div class="box">
-  <div class="grid">
-    <div>
-      <label>Username trong game</label>
-      <input id="username" autocomplete="off"
-        placeholder="Nhập username">
-    </div>
+<div class="grid">
 
-    <div>
-      <label>Mật khẩu /login (nếu cần)</label>
-      <input id="password" type="password"
-        autocomplete="new-password"
-        placeholder="Nhập mật khẩu">
-    </div>
-  </div>
+<div>
+<label>Username trong game</label>
+<input id="username" autocomplete="off" placeholder="Nhập username">
+</div>
 
-  <div class="actions">
-    <button id="connect">Kết nối bot</button>
-    <button id="disconnect" class="red">Ngắt kết nối</button>
-  </div>
+<div>
+<label>Mật khẩu /login (nếu cần)</label>
+<input id="password" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu">
+</div>
 
-  <p class="status">
-    Máy chủ: ${HOST} · Phiên bản: ${VERSION}
-  </p>
+</div>
+
+<div class="actions">
+<button id="connect">Kết nối bot</button>
+<button id="disconnect" class="red">Ngắt kết nối</button>
+</div>
+
+<p class="status">Máy chủ: ${HOST} · Phiên bản: ${VERSION}</p>
 </div>
 
 <div class="stats">
-  <div class="stat">Tọa độ<b id="coords">--</b></div>
-  <div class="stat">Máu<b id="health">--</b></div>
-  <div class="stat">Độ đói<b id="food">--</b></div>
-  <div class="stat">Người chơi gần nhất<b id="nearest">--</b></div>
+<div class="stat">Tọa độ<b id="coords">--</b></div>
+<div class="stat">Máu<b id="health">--</b></div>
+<div class="stat">Độ đói<b id="food">--</b></div>
+<div class="stat">Người chơi gần nhất<b id="nearest">--</b></div>
 </div>
 
 <div id="gui" class="box">
-  <b id="guiTitle">Menu trong game</b>
-  <div id="slots" class="slots"></div>
+<b id="guiTitle">Menu trong game</b>
+<div id="slots" class="slots"></div>
 </div>
 
 <div class="grid">
-  <div class="box">
-    <b>📜 Nhật ký hệ thống</b>
-    <div id="logs" class="panel"></div>
-  </div>
 
-  <div class="box">
-    <b>💬 Chat trong game</b>
-    <div id="chat" class="panel"></div>
-  </div>
+<div class="box">
+<b>📜 Nhật ký hệ thống</b>
+<div id="logs" class="panel"></div>
 </div>
 
 <div class="box">
-  <label>Lệnh / tin nhắn</label>
-
-  <div class="actions">
-    <input id="command"
-      placeholder="Nhập lệnh hoặc chat..."
-      style="flex:1;min-width:180px">
-
-    <button id="send" class="blue">Gửi</button>
-  </div>
+<b>💬 Chat trong game</b>
+<div id="chat" class="panel"></div>
 </div>
+
+</div>
+
+<div class="box">
+<label>Lệnh / tin nhắn</label>
+
+<div class="actions">
+<input id="command" placeholder="Nhập lệnh hoặc chat..." style="flex:1;min-width:180px">
+<button id="send" class="blue">Gửi</button>
+</div>
+</div>
+
+<p class="status">
+Kiểm tra mạng máy chủ:
+<a href="/diagnostics" target="_blank" rel="noopener">/diagnostics</a>
+</p>
 
 </main>
 
 <script src="/socket.io/socket.io.js"></script>
 
 <script>
-const $ = id => document.getElementById(id);
+const $=id=>document.getElementById(id);
+const socket=io();
 
-const socket = io();
+function append(id,text){
+  const el=$(id);
+  const line=document.createElement('div');
 
-function append(id, text) {
-  const el = $(id);
-  const line = document.createElement('div');
-
-  line.textContent = text;
-
+  line.textContent=text;
   el.appendChild(line);
 
-  while (el.children.length > 150) {
+  while(el.children.length>150){
     el.removeChild(el.firstChild);
   }
 
-  el.scrollTop = el.scrollHeight;
+  el.scrollTop=el.scrollHeight;
 }
 
-socket.on('connect', () => {
-  append('logs', 'Đã kết nối Dashboard.');
+socket.on('connect',()=>{
+  append('logs','Đã kết nối Dashboard.');
 });
 
-socket.on('connect_error', err => {
-  append('logs', 'Lỗi Dashboard: ' + err.message);
+socket.on('connect_error',err=>{
+  append('logs','Lỗi Dashboard: '+err.message);
 });
 
-socket.on('log', message => {
-  append('logs', message);
+socket.on('log',m=>{
+  append('logs',m);
 });
 
-socket.on('chat_msg', message => {
-  append('chat', message);
+socket.on('chat_msg',m=>{
+  append('chat',m);
 });
 
-socket.on('status_update', data => {
-  $('status').textContent = data.text;
-
-  $('status').style.color =
-    data.online ? '#218838' : '#c43d3d';
+socket.on('status_update',d=>{
+  $('status').textContent=d.text;
+  $('status').style.color=d.online?'#218838':'#c43d3d';
 });
 
-socket.on('stats_update', data => {
-  $('coords').textContent = data.coords;
-  $('health').textContent = data.health;
-  $('food').textContent = data.food;
-  $('nearest').textContent = data.nearest;
+socket.on('stats_update',d=>{
+  $('coords').textContent=d.coords;
+  $('health').textContent=d.health;
+  $('food').textContent=d.food;
+  $('nearest').textContent=d.nearest;
 });
 
-socket.on('window_close', () => {
-  $('gui').style.display = 'none';
+socket.on('window_close',()=>{
+  $('gui').style.display='none';
 });
 
-socket.on('window_open', data => {
-  $('gui').style.display = 'block';
+socket.on('window_open',d=>{
+  $('gui').style.display='block';
 
-  $('guiTitle').textContent =
-    data.title + ' (' + data.slots.length + ' ô)';
+  $('guiTitle').textContent=d.title+' ('+d.slots.length+' ô)';
 
   $('slots').replaceChildren();
 
-  data.slots.forEach((item, index) => {
-    const cell = document.createElement('button');
+  d.slots.forEach((item,index)=>{
+    const cell=document.createElement('button');
 
-    cell.className = 'slot';
+    cell.className='slot';
+    cell.textContent=item?item.displayName+' ×'+item.count:'';
+    cell.title=item?item.name:'Ô trống';
+    cell.style.background=item?'#777':'#aaa';
 
-    cell.textContent = item
-      ? item.displayName + ' ×' + item.count
-      : '';
-
-    cell.title = item ? item.name : 'Ô trống';
-
-    cell.style.background = item ? '#777' : '#aaa';
-
-    cell.onclick = () => {
-      socket.emit('click_slot', index);
+    cell.onclick=()=>{
+      socket.emit('click_slot',index);
     };
 
     $('slots').appendChild(cell);
   });
 });
 
-$('connect').onclick = () => {
-  const username = $('username').value.trim();
-  const password = $('password').value;
+$('connect').onclick=()=>{
+  const username=$('username').value.trim();
+  const password=$('password').value;
 
-  if (!username) {
+  if(!username){
     alert('Hãy nhập username.');
     return;
   }
 
-  socket.emit('connect_bot', {
-    username,
-    password
-  });
+  socket.emit('connect_bot',{username,password});
 };
 
-$('disconnect').onclick = () => {
+$('disconnect').onclick=()=>{
   socket.emit('disconnect_bot');
 };
 
-function sendCommand() {
-  const value = $('command').value.trim();
+function sendCommand(){
+  const value=$('command').value.trim();
 
-  if (!value) return;
+  if(!value)return;
 
-  socket.emit('send_command', value);
+  socket.emit('send_command',value);
 
-  $('command').value = '';
+  $('command').value='';
 }
 
-$('send').onclick = sendCommand;
+$('send').onclick=sendCommand;
 
-$('command').addEventListener('keydown', event => {
-  if (event.key === 'Enter') {
-    sendCommand();
-  }
+$('command').addEventListener('keydown',e=>{
+  if(e.key==='Enter')sendCommand();
 });
 </script>
 
@@ -922,24 +944,26 @@ io.on('connection', socket => {
     socket.emit('log', line);
   }
 
+  // Kết nối bot
   socket.on('connect_bot', data => {
-    if (!data || typeof data.username !== 'string') {
-      return;
-    }
+    if (!data || typeof data.username !== 'string') return;
 
     const username = data.username.trim();
 
-    const password =
-      typeof data.password === 'string'
-        ? data.password
-        : '';
+    const password = typeof data.password === 'string'
+      ? data.password
+      : '';
 
     if (
       !username ||
       username.length > 16 ||
       password.length > 128
     ) {
-      socket.emit('log', 'Username hoặc mật khẩu không hợp lệ.');
+      socket.emit(
+        'log',
+        'Username hoặc mật khẩu không hợp lệ.'
+      );
+
       return;
     }
 
@@ -948,35 +972,29 @@ io.on('connection', socket => {
     activeUsername = username;
     activePassword = password;
 
+    if (isRunning || bot || isConnecting) {
+      closeBot('Thay đổi tài khoản bot');
+    }
+
     isRunning = true;
     intentionalEnd = false;
-
-    clearReconnect();
-
-    // Nếu đang có phiên cũ, đóng phiên đó trước.
-    if (bot) {
-      closeBot('Thay đổi tài khoản bot');
-
-      isRunning = true;
-      intentionalEnd = false;
-    }
 
     startBot();
   });
 
+  // Ngắt kết nối bot
   socket.on('disconnect_bot', () => {
     closeBot('Đã ngắt kết nối thủ công');
 
     log('Người dùng đã ngắt kết nối bot.');
   });
 
+  // Gửi lệnh
   socket.on('send_command', command => {
     if (
       typeof command !== 'string' ||
       command.length > 256
-    ) {
-      return;
-    }
+    ) return;
 
     if (!bot || !isRunning || !isOnline) {
       socket.emit('log', 'Bot chưa online.');
@@ -1004,10 +1022,11 @@ io.on('connection', socket => {
     }
   });
 
+  // Click GUI
   socket.on('click_slot', index => {
-    if (!Number.isInteger(index)) return;
-
-    clickSlot(index, 'click từ Dashboard');
+    if (Number.isInteger(index)) {
+      clickSlot(index, 'click từ Dashboard');
+    }
   });
 });
 
@@ -1025,7 +1044,7 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // ==============================
-// TẮT ỨNG DỤNG
+// TẮT ỨNG DỤNG AN TOÀN
 // ==============================
 
 function shutdown() {
