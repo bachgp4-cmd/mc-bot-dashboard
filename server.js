@@ -14,34 +14,47 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e6 });
 
 const PORT = Number(process.env.PORT || 10000);
-const HOST = process.env.MC_HOST || 'kingmc.vn';
+const HOST = process.env.MC_HOST || 'java.kingmc.vn';
 const VERSION = process.env.MC_VERSION || '1.21.11';
-const TCP_TIMEOUT = 10000;
+
+const TCP_TIMEOUT = 8000;
 const CONNECT_TIMEOUT = 45000;
 const RECONNECT_DELAY = 10000;
+
+const KINGMC_IP = '138.252.132.0';
 
 let bot = null;
 let isRunning = false;
 let isOnline = false;
 let isConnecting = false;
 let statusText = 'Đang ngắt kết nối';
+
 let reconnectTimer = null;
 let statsTimer = null;
 let connectWatchdog = null;
 let sequenceTimers = [];
+
 let currentWindow = null;
 let expectedAction = null;
+
 let activeUsername = '';
 let activePassword = '';
+
 let connectionId = 0;
 let intentionalEnd = false;
 
 const MAX_LOGS = 150;
 const logHistory = [];
 
+// ========================================
+// LOG VÀ TRẠNG THÁI
+// ========================================
+
 function log(message) {
   const line = `[${new Date().toLocaleTimeString('vi-VN')}] ${String(message)}`;
+
   console.log(line);
+
   logHistory.push(line);
 
   if (logHistory.length > MAX_LOGS) {
@@ -54,7 +67,11 @@ function log(message) {
 function setStatus(text, online = false) {
   statusText = text;
   isOnline = online;
-  io.emit('status_update', { text, online });
+
+  io.emit('status_update', {
+    text,
+    online
+  });
 }
 
 function clearReconnect() {
@@ -73,7 +90,10 @@ function clearWatchdog() {
 }
 
 function clearSequenceTimers() {
-  for (const timer of sequenceTimers) clearTimeout(timer);
+  for (const timer of sequenceTimers) {
+    clearTimeout(timer);
+  }
+
   sequenceTimers = [];
 }
 
@@ -90,9 +110,9 @@ function later(fn, delay, id) {
   return timer;
 }
 
-// ==============================
-// DNS VÀ TÌM ĐỊA CHỈ MINECRAFT
-// ==============================
+// ========================================
+// KIỂM TRA DNS
+// ========================================
 
 async function resolveMinecraftEndpoint() {
   log(`[DNS] Đang tra cứu SRV của ${HOST}...`);
@@ -101,14 +121,13 @@ async function resolveMinecraftEndpoint() {
 
   try {
     records = await dns.resolveSrv(`_minecraft._tcp.${HOST}`);
+
     log(`[SRV RECORDS] ${JSON.stringify(records)}`);
   } catch (err) {
     log(`[SRV] Không lấy được SRV: ${err.code || err.message}`);
   }
 
   if (!records.length) {
-    log('[INFO] Không có SRV, dùng cổng mặc định 25565.');
-
     return [{
       host: HOST,
       port: 25565
@@ -117,30 +136,34 @@ async function resolveMinecraftEndpoint() {
 
   records.sort((a, b) => a.priority - b.priority);
 
-  return records.map(r => ({
-    host: r.name.replace(/\.$/, ''),
-    port: r.port
+  return records.map(record => ({
+    host: record.name.replace(/\.$/, ''),
+    port: record.port
   }));
 }
 
-// ==============================
-// KIỂM TRA KẾT NỐI TCP
-// ==============================
+// ========================================
+// KIỂM TRA TCP
+// ========================================
 
 function testTCP(host, port, timeout = TCP_TIMEOUT) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host, port });
+    const socket = net.createConnection({
+      host,
+      port
+    });
 
-    let done = false;
+    let finished = false;
 
-    const finish = err => {
-      if (done) return;
+    function finish(err) {
+      if (finished) return;
 
-      done = true;
+      finished = true;
       socket.destroy();
 
-      err ? reject(err) : resolve();
-    };
+      if (err) reject(err);
+      else resolve();
+    }
 
     socket.setTimeout(timeout);
 
@@ -156,9 +179,32 @@ function testTCP(host, port, timeout = TCP_TIMEOUT) {
   });
 }
 
-// ==============================
+async function checkTCP(host, port) {
+  const started = Date.now();
+
+  try {
+    await testTCP(host, port);
+
+    return {
+      host,
+      port,
+      ok: true,
+      timeMs: Date.now() - started
+    };
+  } catch (err) {
+    return {
+      host,
+      port,
+      ok: false,
+      timeMs: Date.now() - started,
+      error: err.code || err.message
+    };
+  }
+}
+
+// ========================================
 // KIỂM TRA HTTPS
-// ==============================
+// ========================================
 
 function testHTTPS(host = 'www.google.com', timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -169,18 +215,16 @@ function testHTTPS(host = 'www.google.com', timeout = 10000) {
       timeout
     }, res => {
       res.resume();
+
       resolve({
         statusCode: res.statusCode
       });
     });
 
     req.once('timeout', () => {
-      req.destroy(
-        Object.assign(
-          new Error('HTTPS timeout'),
-          { code: 'ETIMEDOUT' }
-        )
-      );
+      const err = new Error('HTTPS timeout');
+      err.code = 'ETIMEDOUT';
+      req.destroy(err);
     });
 
     req.once('error', reject);
@@ -188,9 +232,9 @@ function testHTTPS(host = 'www.google.com', timeout = 10000) {
   });
 }
 
-// ==============================
-// TÌM ENDPOINT HOẠT ĐỘNG
-// ==============================
+// ========================================
+// TÌM ENDPOINT MINECRAFT
+// ========================================
 
 async function findWorkingEndpoint() {
   const candidates = await resolveMinecraftEndpoint();
@@ -203,7 +247,7 @@ async function findWorkingEndpoint() {
     try {
       await testTCP(endpoint.host, endpoint.port);
 
-      log('[SUCCESS] Kết nối TCP tới Minecraft thành công.');
+      log('[SUCCESS] TCP Minecraft thành công.');
 
       return endpoint;
     } catch (err) {
@@ -216,78 +260,155 @@ async function findWorkingEndpoint() {
   }
 
   throw new Error(
-    `Không thể kết nối TCP tới máy chủ Minecraft: ${
+    `Không thể kết nối TCP: ${
       lastError?.code || lastError?.message || 'unknown'
     }`
   );
 }
 
-// ==============================
-// TRANG CHẨN ĐOÁN MẠNG
-// ==============================
+// ========================================
+// TRANG CHẨN ĐOÁN NÂNG CAO
+// ========================================
 
 app.get('/diagnostics', async (req, res) => {
   const result = {
     host: HOST,
+    targetIp: KINGMC_IP,
     checkedAt: new Date().toISOString(),
-    dns: null,
-    https: null,
-    minecraftTcp: null
+    dns: {},
+    https: {},
+    kingmc: {},
+    external: {}
   };
 
-  // Kiểm tra DNS
+  // 1. Kiểm tra DNS
+
   try {
-    result.dns = await dns.lookup('www.google.com');
+    result.dns.google = await dns.lookup('www.google.com');
   } catch (err) {
-    result.dns = {
+    result.dns.google = {
+      ok: false,
       error: err.code || err.message
     };
   }
 
-  // Kiểm tra HTTPS
   try {
-    result.https = await testHTTPS();
+    result.dns.kingmc = await dns.lookup(HOST);
   } catch (err) {
-    result.https = {
+    result.dns.kingmc = {
+      ok: false,
       error: err.code || err.message
     };
   }
 
-  // Kiểm tra TCP Minecraft
   try {
-    const endpoints = await resolveMinecraftEndpoint();
-    const checks = [];
+    result.dns.srv = await dns.resolveSrv(
+      `_minecraft._tcp.${HOST}`
+    );
+  } catch (err) {
+    result.dns.srv = {
+      error: err.code || err.message
+    };
+  }
 
-    for (const endpoint of endpoints) {
-      try {
-        await testTCP(endpoint.host, endpoint.port);
+  // 2. Kiểm tra HTTPS
 
-        checks.push({
-          ...endpoint,
-          ok: true
-        });
-      } catch (err) {
-        checks.push({
-          ...endpoint,
-          ok: false,
-          error: err.code || err.message
-        });
-      }
+  try {
+    result.https.google = await testHTTPS();
+
+  } catch (err) {
+    result.https.google = {
+      ok: false,
+      error: err.code || err.message
+    };
+  }
+
+  // 3. Kiểm tra TCP tới IP KingMC
+
+  const kingmcPorts = [80, 443, 25565];
+
+  const kingmcChecks = await Promise.all(
+    kingmcPorts.map(port => checkTCP(KINGMC_IP, port))
+  );
+
+  result.kingmc.directIP = kingmcChecks;
+
+  // 4. Kiểm tra TCP qua tên miền
+
+  result.kingmc.hostname = await checkTCP(
+    HOST,
+    25565
+  );
+
+  // 5. Kiểm tra TCP tới máy chủ độc lập
+
+  const externalTargets = [
+    {
+      name: 'Cloudflare HTTPS',
+      host: '1.1.1.1',
+      port: 443
+    },
+    {
+      name: 'Example HTTP',
+      host: 'example.com',
+      port: 80
+    },
+    {
+      name: 'Hypixel Minecraft',
+      host: 'mc.hypixel.net',
+      port: 25565
     }
+  ];
 
-    result.minecraftTcp = checks;
-  } catch (err) {
-    result.minecraftTcp = {
-      error: err.code || err.message
-    };
+  const externalChecks = await Promise.all(
+    externalTargets.map(async target => ({
+      name: target.name,
+      ...(await checkTCP(target.host, target.port))
+    }))
+  );
+
+  result.external = externalChecks;
+
+  // 6. Đưa ra nhận xét sơ bộ
+
+  const kingmcGame = kingmcChecks.find(
+    item => item.port === 25565
+  );
+
+  const cloudflare = externalChecks.find(
+    item => item.name === 'Cloudflare HTTPS'
+  );
+
+  const hypixel = externalChecks.find(
+    item => item.name === 'Hypixel Minecraft'
+  );
+
+  result.analysis = {
+    kingmcMinecraftTCP: kingmcGame?.ok ?? false,
+    externalHTTPS: cloudflare?.ok ?? false,
+    externalMinecraftTCP: hypixel?.ok ?? false
+  };
+
+  if (kingmcGame?.ok) {
+    result.analysis.note =
+      'TCP tới KingMC thành công tại thời điểm kiểm tra.';
+  } else if (hypixel?.ok) {
+    result.analysis.note =
+      'Minecraft TCP tới máy chủ độc lập thành công, nhưng KingMC thất bại. Cần kiểm tra tuyến mạng hoặc chính sách lọc riêng tới KingMC.';
+  } else if (cloudflare?.ok) {
+    result.analysis.note =
+      'TCP HTTPS hoạt động, nhưng TCP Minecraft tới cả KingMC và máy chủ đối chiếu thất bại. Có thể có hạn chế đối với kết nối TCP tới cổng Minecraft.';
+  } else {
+    result.analysis.note =
+      'Nhiều phép thử TCP thất bại. Cần xem xét hạn chế mạng outbound hoặc sự cố mạng của môi trường chạy.';
   }
 
   res.json(result);
 });
 
-// ==============================
-// XỬ LÝ GUI MINECRAFT
-// ==============================
+// ========================================
+// GUI MINECRAFT
+// ========================================
 
 function getWindowTitle(window) {
   try {
@@ -337,9 +458,9 @@ function clickSlot(index, label = 'Dashboard') {
     });
 }
 
-// ==============================
+// ========================================
 // THỐNG KÊ BOT
-// ==============================
+// ========================================
 
 function sendStats() {
   if (!bot?.entity) return;
@@ -347,7 +468,7 @@ function sendStats() {
   const pos = bot.entity.position;
 
   const nearby = Object.values(bot.players || {})
-    .filter(p => p.username !== bot.username && p.entity);
+    .filter(player => player.username !== bot.username && player.entity);
 
   nearby.sort((a, b) => {
     return a.entity.position.distanceTo(pos) -
@@ -362,9 +483,9 @@ function sendStats() {
   });
 }
 
-// ==============================
+// ========================================
 // QUY TRÌNH LOGIN VÀ AFK
-// ==============================
+// ========================================
 
 function runAfterSpawn(id) {
   if (activePassword) {
@@ -393,9 +514,9 @@ function runAfterSpawn(id) {
   }, activePassword ? 12000 : 5000, id);
 }
 
-// ==============================
-// TỰ ĐỘNG KẾT NỐI LẠI
-// ==============================
+// ========================================
+// KẾT NỐI LẠI
+// ========================================
 
 function scheduleReconnect(reason) {
   if (!isRunning || intentionalEnd || reconnectTimer) return;
@@ -425,9 +546,9 @@ function scheduleReconnect(reason) {
   log('Sẽ thử kết nối lại sau 10 giây.');
 }
 
-// ==============================
+// ========================================
 // KHỞI ĐỘNG BOT
-// ==============================
+// ========================================
 
 async function startBot() {
   if (!isRunning || isConnecting) return;
@@ -478,9 +599,7 @@ async function startBot() {
 
   setStatus('Đang đăng nhập Minecraft...', false);
 
-  log(
-    `Đang tạo bot tới ${endpoint.host}:${endpoint.port}...`
-  );
+  log(`Đang tạo bot tới ${endpoint.host}:${endpoint.port}...`);
 
   let newBot;
 
@@ -502,13 +621,10 @@ async function startBot() {
 
   bot = newBot;
 
-  // Timeout nếu bot không spawn
   connectWatchdog = setTimeout(() => {
     if (id !== connectionId || !isRunning || isOnline) return;
 
-    log(
-      `[TIMEOUT] Không spawn sau ${CONNECT_TIMEOUT / 1000} giây; sẽ thử kết nối lại.`
-    );
+    log(`[TIMEOUT] Không spawn sau ${CONNECT_TIMEOUT / 1000} giây.`);
 
     const stuckBot = bot;
 
@@ -524,14 +640,12 @@ async function startBot() {
     scheduleReconnect('Connection timeout');
   }, CONNECT_TIMEOUT);
 
-  // Sự kiện login
   newBot.on('login', () => {
     if (id === connectionId) {
       log('Đã hoàn tất bước login giao thức.');
     }
   });
 
-  // Sự kiện spawn
   newBot.on('spawn', () => {
     if (id !== connectionId) return;
 
@@ -550,7 +664,6 @@ async function startBot() {
     runAfterSpawn(id);
   });
 
-  // Tin nhắn trong game
   newBot.on('message', message => {
     if (id !== connectionId) return;
 
@@ -561,7 +674,6 @@ async function startBot() {
     }
   });
 
-  // Khi bị kick
   newBot.on('kicked', (reason, loggedIn) => {
     if (id !== connectionId) return;
 
@@ -580,13 +692,9 @@ async function startBot() {
     clearSequenceTimers();
     clearStats();
 
-    setStatus(
-      'Máy chủ đã kick bot; hãy kiểm tra lý do.',
-      false
-    );
+    setStatus('Máy chủ đã kick bot; hãy kiểm tra lý do.', false);
   });
 
-  // Khi mở GUI
   newBot.on('windowOpen', window => {
     if (id !== connectionId) return;
 
@@ -612,7 +720,6 @@ async function startBot() {
           expectedAction = 'RANDOM_0_9';
 
           bot.chat('/afk');
-
           log('Đã gửi lệnh /afk.');
         }, 4000, id);
       }, 3000, id);
@@ -631,7 +738,6 @@ async function startBot() {
     }
   });
 
-  // Khi đóng GUI
   newBot.on('windowClose', () => {
     if (id !== connectionId) return;
 
@@ -640,14 +746,12 @@ async function startBot() {
     io.emit('window_close');
   });
 
-  // Khi máu thay đổi
   newBot.on('health', () => {
     if (id === connectionId) {
       sendStats();
     }
   });
 
-  // Khi mất kết nối
   newBot.on('end', reason => {
     if (id !== connectionId) return;
 
@@ -659,21 +763,18 @@ async function startBot() {
     scheduleReconnect(reason);
   });
 
-  // Khi xảy ra lỗi
   newBot.on('error', err => {
     if (id !== connectionId) return;
 
     log(`[ERROR] ${err.code || ''} ${err.message}`);
 
     setStatus('Có lỗi kết nối; xem nhật ký.', false);
-
-    // Watchdog hoặc event end sẽ xử lý tiếp.
   });
 }
 
-// ==============================
-// NGẮT KẾT NỐI BOT
-// ==============================
+// ========================================
+// NGẮT KẾT NỐI
+// ========================================
 
 function closeBot(reason = 'Đã ngắt kết nối') {
   isRunning = false;
@@ -706,9 +807,9 @@ function closeBot(reason = 'Đã ngắt kết nối') {
   setStatus(reason, false);
 }
 
-// ==============================
-// GIAO DIỆN DASHBOARD
-// ==============================
+// ========================================
+// DASHBOARD
+// ========================================
 
 app.get('/', (req, res) => {
   res.type('html').send(`<!doctype html>
@@ -717,7 +818,6 @@ app.get('/', (req, res) => {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Minecraft Bot Dashboard</title>
-
 <style>
 *{box-sizing:border-box}
 body{margin:0;padding:18px;background:#f3f5f7;color:#222;font:15px Arial,sans-serif}
@@ -742,10 +842,8 @@ button.blue{background:#087db5}
 @media(max-width:700px){.grid,.stats{grid-template-columns:1fr 1fr}}
 </style>
 </head>
-
 <body>
 <main>
-
 <h2>
 <span>🤖 Minecraft Bot Dashboard</span>
 <span id="status" class="status">Đang ngắt kết nối</span>
@@ -753,24 +851,19 @@ button.blue{background:#087db5}
 
 <div class="box">
 <div class="grid">
-
 <div>
 <label>Username trong game</label>
 <input id="username" autocomplete="off" placeholder="Nhập username">
 </div>
-
 <div>
 <label>Mật khẩu /login (nếu cần)</label>
 <input id="password" type="password" autocomplete="new-password" placeholder="Nhập mật khẩu">
 </div>
-
 </div>
-
 <div class="actions">
 <button id="connect">Kết nối bot</button>
 <button id="disconnect" class="red">Ngắt kết nối</button>
 </div>
-
 <p class="status">Máy chủ: ${HOST} · Phiên bản: ${VERSION}</p>
 </div>
 
@@ -787,22 +880,18 @@ button.blue{background:#087db5}
 </div>
 
 <div class="grid">
-
 <div class="box">
 <b>📜 Nhật ký hệ thống</b>
 <div id="logs" class="panel"></div>
 </div>
-
 <div class="box">
 <b>💬 Chat trong game</b>
 <div id="chat" class="panel"></div>
 </div>
-
 </div>
 
 <div class="box">
 <label>Lệnh / tin nhắn</label>
-
 <div class="actions">
 <input id="command" placeholder="Nhập lệnh hoặc chat..." style="flex:1;min-width:180px">
 <button id="send" class="blue">Gửi</button>
@@ -810,14 +899,12 @@ button.blue{background:#087db5}
 </div>
 
 <p class="status">
-Kiểm tra mạng máy chủ:
+Kiểm tra mạng:
 <a href="/diagnostics" target="_blank" rel="noopener">/diagnostics</a>
 </p>
-
 </main>
 
 <script src="/socket.io/socket.io.js"></script>
-
 <script>
 const $=id=>document.getElementById(id);
 const socket=io();
@@ -825,7 +912,6 @@ const socket=io();
 function append(id,text){
   const el=$(id);
   const line=document.createElement('div');
-
   line.textContent=text;
   el.appendChild(line);
 
@@ -844,13 +930,8 @@ socket.on('connect_error',err=>{
   append('logs','Lỗi Dashboard: '+err.message);
 });
 
-socket.on('log',m=>{
-  append('logs',m);
-});
-
-socket.on('chat_msg',m=>{
-  append('chat',m);
-});
+socket.on('log',m=>append('logs',m));
+socket.on('chat_msg',m=>append('chat',m));
 
 socket.on('status_update',d=>{
   $('status').textContent=d.text;
@@ -870,9 +951,7 @@ socket.on('window_close',()=>{
 
 socket.on('window_open',d=>{
   $('gui').style.display='block';
-
   $('guiTitle').textContent=d.title+' ('+d.slots.length+' ô)';
-
   $('slots').replaceChildren();
 
   d.slots.forEach((item,index)=>{
@@ -913,7 +992,6 @@ function sendCommand(){
   if(!value)return;
 
   socket.emit('send_command',value);
-
   $('command').value='';
 }
 
@@ -923,14 +1001,13 @@ $('command').addEventListener('keydown',e=>{
   if(e.key==='Enter')sendCommand();
 });
 </script>
-
 </body>
 </html>`);
 });
 
-// ==============================
+// ========================================
 // SOCKET.IO
-// ==============================
+// ========================================
 
 io.on('connection', socket => {
   log(`Có người truy cập Dashboard: ${socket.id}`);
@@ -944,7 +1021,6 @@ io.on('connection', socket => {
     socket.emit('log', line);
   }
 
-  // Kết nối bot
   socket.on('connect_bot', data => {
     if (!data || typeof data.username !== 'string') return;
 
@@ -959,11 +1035,7 @@ io.on('connection', socket => {
       username.length > 16 ||
       password.length > 128
     ) {
-      socket.emit(
-        'log',
-        'Username hoặc mật khẩu không hợp lệ.'
-      );
-
+      socket.emit('log', 'Username hoặc mật khẩu không hợp lệ.');
       return;
     }
 
@@ -982,14 +1054,11 @@ io.on('connection', socket => {
     startBot();
   });
 
-  // Ngắt kết nối bot
   socket.on('disconnect_bot', () => {
     closeBot('Đã ngắt kết nối thủ công');
-
     log('Người dùng đã ngắt kết nối bot.');
   });
 
-  // Gửi lệnh
   socket.on('send_command', command => {
     if (
       typeof command !== 'string' ||
@@ -1015,14 +1084,12 @@ io.on('connection', socket => {
 
     try {
       bot.chat(cmd);
-
       log(`Đã gửi lệnh từ Dashboard: ${cmd}`);
     } catch (err) {
       log(`Không gửi được lệnh: ${err.message}`);
     }
   });
 
-  // Click GUI
   socket.on('click_slot', index => {
     if (Number.isInteger(index)) {
       clickSlot(index, 'click từ Dashboard');
@@ -1030,9 +1097,9 @@ io.on('connection', socket => {
   });
 });
 
-// ==============================
+// ========================================
 // KHỞI ĐỘNG SERVER
-// ==============================
+// ========================================
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('=================================');
@@ -1043,9 +1110,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('=================================');
 });
 
-// ==============================
-// TẮT ỨNG DỤNG AN TOÀN
-// ==============================
+// ========================================
+// TẮT ỨNG DỤNG
+// ========================================
 
 function shutdown() {
   log('Đang tắt ứng dụng...');
