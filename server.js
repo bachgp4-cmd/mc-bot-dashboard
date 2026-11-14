@@ -25,7 +25,9 @@ let hasLoggedIn = false;
 let currentStatusText = 'Đang ngắt kết nối';
 let isOnline = false;
 
-// Mảng quản lý tất cả các timer hẹn giờ gửi lệnh (để hủy sạch khi disconnect)
+// Cờ kiểm soát hành động click menu tiếp theo
+let expectedAction = null; // 'CLICK_24' (sau /menu) hoặc 'RANDOM_0_9' (sau /afk)
+
 let activeSequenceTimeouts = [];
 
 function clearAllSequenceTimeouts() {
@@ -66,10 +68,19 @@ app.get('/', (req, res) => {
         .stat-card b { color: #2e7d32; display: block; margin-top: 4px; font-size: 15px; font-family: monospace; }
         @media (max-width: 768px) { .stats-bar { grid-template-columns: 1fr 1fr; } }
 
+        /* Khung hiển thị GUI tương tác chuẩn tỷ lệ trong game */
+        #guiContainer { background: #fafafa; border: 2px solid #2e7d32; border-radius: 8px; padding: 15px; margin-bottom: 15px; display: none; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        #guiTitle { font-weight: bold; color: #333; margin-bottom: 10px; font-size: 15px; }
+        .gui-grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; max-width: 520px; margin: 0 auto; background: #c6c6c6; padding: 8px; border-radius: 6px; border: 2px solid #8b8b8b; }
+        .gui-slot { background: #8b8b8b; border: 2px solid; border-color: #373737 #fff #fff #373737; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 10px; cursor: pointer; border-radius: 2px; color: #fff; transition: background 0.15s; position: relative; overflow: hidden; }
+        .gui-slot:hover { background: #8b8b8b88; border-color: #ffeb3b; }
+        .slot-name { text-align: center; padding: 0 2px; word-break: break-all; line-height: 1.2; font-weight: bold; }
+        .slot-count { position: absolute; bottom: 2px; right: 4px; font-size: 10px; color: #ffeb3b; font-weight: bold; background: rgba(0,0,0,0.6); padding: 0 2px; border-radius: 2px; }
+
         .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
-        .panel { background: #fafafa; border: 1px solid #ccc; border-radius: 6px; padding: 10px; height: 320px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; color: #333; }
+        .panel { background: #fafafa; border: 1px solid #ccc; border-radius: 6px; padding: 10px; height: 260px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; color: #333; }
         .panel-title { font-weight: bold; margin-bottom: 8px; color: #555; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
         
         .log-entry { margin-bottom: 4px; border-bottom: 1px solid #eee; padding-bottom: 2px; color: #444; }
@@ -117,6 +128,12 @@ app.get('/', (req, res) => {
           <div class="stat-card">Máu (HP)<b id="statHealth">❤️ -- / 20</b></div>
           <div class="stat-card">Độ đói / No<b id="statFood">🍖 -- / 20</b></div>
           <div class="stat-card">Player gần nhất<b id="statNearest">Không có</b></div>
+        </div>
+
+        <!-- Khung hiển thị GUI chuẩn trong game -->
+        <div id="guiContainer">
+          <div id="guiTitle">📋 Menu trong game</div>
+          <div id="guiGrid" class="gui-grid"></div>
         </div>
 
         <div class="dashboard-grid">
@@ -191,6 +208,46 @@ app.get('/', (req, res) => {
           chatDiv.scrollTop = chatDiv.scrollHeight;
         });
 
+        socket.on('window_open', (data) => {
+          const container = document.getElementById('guiContainer');
+          const titleElem = document.getElementById('guiTitle');
+          const gridElem = document.getElementById('guiGrid');
+          
+          container.style.display = 'block';
+          titleElem.textContent = '📋 ' + data.title + ' (' + data.slots.length + ' ô)';
+          gridElem.innerHTML = '';
+
+          data.slots.forEach((item, index) => {
+            const slot = document.createElement('div');
+            slot.className = 'gui-slot';
+            
+            if (item) {
+              let shortName = item.name.replace('minecraft:', '');
+              slot.innerHTML = '<span class="slot-name">' + shortName + '</span>';
+              if (item.count > 1) {
+                const countBadge = document.createElement('span');
+                countBadge.className = 'slot-count';
+                countBadge.textContent = item.count;
+                slot.appendChild(countBadge);
+              }
+              slot.title = item.displayName || item.name;
+            } else {
+              slot.style.opacity = '0.3';
+            }
+
+            // Cho phép click trực tiếp trên web vào slot
+            slot.onclick = () => {
+              socket.emit('click_slot', index);
+            };
+
+            gridElem.appendChild(slot);
+          });
+        });
+
+        socket.on('window_close', () => {
+          document.getElementById('guiContainer').style.display = 'none';
+        });
+
         function sendCommand() {
           const input = document.getElementById('cmdInput');
           const message = input.value.trim();
@@ -249,7 +306,6 @@ function sendStatsToWeb() {
 function startBot() {
   if (!isRunning) return;
 
-  // Dọn dẹp kết nối và các hẹn giờ cũ
   clearAllSequenceTimeouts();
   if (bot) {
     try { bot.quit(); } catch(e) {}
@@ -257,6 +313,8 @@ function startBot() {
   }
   if (statsInterval) clearInterval(statsInterval);
   hasLoggedIn = false;
+  expectedAction = null;
+  io.emit('window_close');
 
   logToWeb("🔄 Đang kết nối tới " + lastSavedConfig.host + " với tên " + lastSavedConfig.username + "...");
   updateStatus('Đang kết nối...', false);
@@ -281,25 +339,24 @@ function startBot() {
     if (statsInterval) clearInterval(statsInterval);
     statsInterval = setInterval(sendStatsToWeb, 1000);
 
-    // Thực hiện gửi /login 2 lần, ngắt ngay nếu văng bot trong lúc chờ
     if (!hasLoggedIn) {
       hasLoggedIn = true;
 
-      // Bước 1: Chờ 5s gửi /login lần 1
+      // Gửi /login 2 lần
       const t1 = setTimeout(() => {
         if (!isRunning || !bot || !isOnline) return;
         bot.chat('/login ' + lastSavedConfig.password);
         logToWeb("🔐 Đã gửi lệnh đăng nhập (/login) lần 1");
 
-        // Bước 2: Chờ 3s gửi /login lần 2
         const t2 = setTimeout(() => {
           if (!isRunning || !bot || !isOnline) return;
           bot.chat('/login ' + lastSavedConfig.password);
           logToWeb("🔐 Đã gửi lệnh đăng nhập (/login) lần 2");
 
-          // Bước 3: Chờ 4s mới gửi /menu
+          // Gửi /menu và đặt cờ mong đợi click slot 24
           const t3 = setTimeout(() => {
             if (!isRunning || !bot || !isOnline) return;
+            expectedAction = 'CLICK_24';
             bot.chat('/menu');
             logToWeb("📋 Đã gửi lệnh /menu");
           }, 4000);
@@ -323,18 +380,28 @@ function startBot() {
       windowTitle = window.title ? window.title.toString() : "Menu";
     }
 
-    logToWeb("📋 Đã nhận diện Menu ngầm: " + windowTitle + " (" + window.slots.length + " ô)");
+    logToWeb("📋 Đã mở GUI: " + windowTitle + " (" + window.slots.length + " ô)");
 
-    // Slot 24 cho Menu chính
-    if (window.slots.length >= 25) {
+    // Gửi dữ liệu GUI lên Web để hiển thị trực quan
+    const slotsData = window.slots.map(item => item ? { name: item.name, count: item.count, displayName: item.displayName } : null);
+    io.emit('window_open', {
+      title: windowTitle,
+      slots: slotsData
+    });
+
+    // Xử lý tự động theo yêu cầu
+    if (expectedAction === 'CLICK_24') {
+      expectedAction = null; // Reset cờ
       const t4 = setTimeout(() => {
         if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
         try {
           bot.clickWindow(24, 0, 0);
-          logToWeb("👉 Đã tự động click slot thứ 24 (chọn chế độ server)");
+          logToWeb("👉 Đã tự động chọn slot 24 sau lệnh /menu");
 
+          // Sau khi chọn slot 24, đợi 4s rồi gửi lệnh /afk và đặt cờ chọn ngẫu nhiên 0-9
           const t5 = setTimeout(() => {
             if (!isRunning || !bot || !isOnline) return;
+            expectedAction = 'RANDOM_0_9';
             bot.chat('/afk');
             logToWeb("💬 Đã gửi lệnh /afk");
           }, 4000);
@@ -346,17 +413,16 @@ function startBot() {
       }, 3000);
 
       activeSequenceTimeouts.push(t4);
-    }
-
-    // Slot 8 cho Menu AFK
-    if (window.slots.length === 63 || window.slots.length === 54) {
+    } else if (expectedAction === 'RANDOM_0_9') {
+      expectedAction = null; // Reset cờ
       const t6 = setTimeout(() => {
         if (!isRunning || !bot || !isOnline || currentWindow !== window) return;
         try {
-          bot.clickWindow(8, 0, 0);
-          logToWeb("🎯 Đã tự động chọn slot thứ 8 trong menu AFK");
+          const randomSlot = Math.floor(Math.random() * 10); // Ngẫu nhiên 0 đến 9
+          bot.clickWindow(randomSlot, 0, 0);
+          logToWeb("🎲 Đã chọn ngẫu nhiên slot thứ " + randomSlot + " sau lệnh /afk");
         } catch (err) {
-          logToWeb("⚠️ Lỗi click slot 8: " + err.message);
+          logToWeb("⚠️ Lỗi click slot ngẫu nhiên: " + err.message);
         }
       }, 1500);
 
@@ -366,16 +432,17 @@ function startBot() {
 
   bot.on('windowClose', () => {
     currentWindow = null;
+    io.emit('window_close');
   });
 
-  // Khi bị DISCONNECT: Hủy sạch timer gửi lệnh, lập tức dừng chuỗi gửi login/menu
   bot.on('end', (reason) => {
     logToWeb("⚠️ Bot bị ngắt kết nối do: " + reason);
 
-    // DỪNG TOÀN BỘ CHUỖI GỬI LỆNH LOGIN / MENU HIỆN TẠI
     clearAllSequenceTimeouts();
     if (statsInterval) clearInterval(statsInterval);
     hasLoggedIn = false;
+    expectedAction = null;
+    io.emit('window_close');
     updateStatus('Mất kết nối, chờ reconnect...', false);
 
     if (isRunning) {
@@ -432,16 +499,41 @@ io.on('connection', (socket) => {
       try { bot.quit(); } catch (e) {}
       bot = null;
     }
+    io.emit('window_close');
     updateStatus('Đã ngắt kết nối thủ công', false);
     logToWeb("🛑 Bạn đã ngắt kết nối bot thủ công.");
   });
 
   socket.on('send_command', (cmd) => {
     if (bot && isRunning && isOnline) {
+      const cleanCmd = cmd.trim().toLowerCase();
+      if (cleanCmd === '/menu') {
+        expectedAction = 'CLICK_24';
+      } else if (cleanCmd === '/afk') {
+        expectedAction = 'RANDOM_0_9';
+      }
       bot.chat(cmd);
       logToWeb("📤 [Web gửi]: " + cmd);
     } else {
       socket.emit('log', "⚠️ Bot chưa kết nối!");
+    }
+  });
+
+  socket.on('click_slot', (slotIndex) => {
+    if (bot && currentWindow && isRunning && isOnline) {
+      try {
+        bot.clickWindow(slotIndex, 0, 0, (err) => {
+          if (err) {
+            logToWeb("⚠️ Lỗi click slot " + slotIndex + ": " + err.message);
+          } else {
+            logToWeb("👉 Bạn đã click thủ công vào slot số " + slotIndex);
+          }
+        });
+      } catch (e) {
+        logToWeb("⚠️ Không thể click slot: " + e.message);
+      }
+    } else {
+      logToWeb("⚠️ Không có GUI nào đang mở hoặc bot chưa kết nối!");
     }
   });
 });
